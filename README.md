@@ -88,9 +88,29 @@ Release artifacts are written to `release/`.
 
 ## Publish A Release
 
-1. Run `powershell -ExecutionPolicy Bypass -File .\build_release.ps1 -SkipInstaller`.
-2. Create a new GitHub Release.
-3. Upload `release/WeatherReport-portable.zip` and `release/SHA256SUMS.txt`.
+Install GitHub CLI once and sign in:
+
+```powershell
+winget install --id GitHub.cli
+gh auth login
+```
+
+Publish the next patch release automatically, for example `v0.1.0` -> `v0.1.1`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -SkipInstaller
+```
+
+Publish a specific version:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -Version v0.1.1 -SkipInstaller
+```
+
+The publish script requires a clean working tree, builds the portable package,
+pushes the current branch if needed, creates and pushes a version tag, and
+publishes `release/WeatherReport-portable.zip` plus `release/SHA256SUMS.txt` as
+GitHub Release assets.
 
 The one-line installer uses the latest GitHub Release and verifies the portable
 zip when `SHA256SUMS.txt` is present.
