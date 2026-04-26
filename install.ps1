@@ -18,6 +18,48 @@ $downloadDir = Join-Path $env:TEMP 'WeatherReportInstall'
 $appName = 'Weather Report'
 $exeName = 'WeatherReport.exe'
 
+function Invoke-Download {
+    param(
+        [string]$Uri,
+        [string]$OutFile
+    )
+
+    Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
+}
+
+function Normalize-PathForSafety {
+    param([string]$Path)
+
+    if (-not $Path) {
+        return $null
+    }
+
+    return [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+}
+
+function Assert-SafeInstallDirectory {
+    param([string]$Path)
+
+    $resolvedParent = Resolve-Path -LiteralPath (Split-Path -Parent $Path) -ErrorAction SilentlyContinue
+    if (-not $resolvedParent) {
+        return
+    }
+
+    $fullPath = Normalize-PathForSafety $Path
+    $programsPath = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs' } else { $null }
+    $blockedPaths = @(
+        (Normalize-PathForSafety ([System.IO.Path]::GetPathRoot($fullPath))),
+        (Normalize-PathForSafety $env:USERPROFILE),
+        (Normalize-PathForSafety $env:LOCALAPPDATA),
+        (Normalize-PathForSafety $env:APPDATA),
+        (Normalize-PathForSafety $programsPath)
+    ) | Where-Object { $_ }
+
+    if ($blockedPaths -contains $fullPath) {
+        throw "Refusing to install directly into unsafe path: $fullPath"
+    }
+}
+
 function New-Shortcut {
     param(
         [string]$Path,
@@ -74,7 +116,7 @@ function Test-AssetChecksum {
     }
 
     $checksumPath = Join-Path $downloadDir 'SHA256SUMS.txt'
-    Invoke-WebRequest -Uri $checksumAsset.browser_download_url -OutFile $checksumPath
+    Invoke-Download -Uri $checksumAsset.browser_download_url -OutFile $checksumPath
 
     $expectedLine = Get-Content $checksumPath |
         Where-Object { $_ -match "\s+$([regex]::Escape($AssetName))$" } |
@@ -94,12 +136,13 @@ function Test-AssetChecksum {
 Write-Host "Installing $appName..."
 
 New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
+Assert-SafeInstallDirectory -Path $InstallDir
 $release = Get-LatestRelease
 $asset = Get-PortableAsset -Release $release
 $zipPath = Join-Path $downloadDir $asset.name
 
 Write-Host "Downloading $($asset.name)..."
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+Invoke-Download -Uri $asset.browser_download_url -OutFile $zipPath
 Test-AssetChecksum -Release $release -AssetName $asset.name -AssetPath $zipPath
 
 Get-Process -Name 'WeatherReport' -ErrorAction SilentlyContinue | Stop-Process -Force

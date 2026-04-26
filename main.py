@@ -1292,7 +1292,8 @@ class WeatherWidget(tk.Tk):
         self.after(200, self._position_widget)
         self.clock_job = self.after(300, self._tick_clock)
         self.bootstrap_job = self.after(700, self.refresh_weather)
-        self.update_job = self.after(UPDATE_CHECK_DELAY_MS, self.check_for_app_update)
+        if not IS_FROZEN:
+            self.update_job = self.after(UPDATE_CHECK_DELAY_MS, self.check_for_app_update)
         self.after(1500, self._refresh_startup_shortcut_if_enabled)
 
     def _apply_app_icon(self) -> None:
@@ -1315,17 +1316,13 @@ class WeatherWidget(tk.Tk):
             self.deiconify()
             return
 
-        menu = pystray.Menu(
+        menu_items = [
             pystray.MenuItem(
                 "Näytä/piilota viikkonäkymä",
                 lambda icon, item: self.after(0, self._toggle_popup_from_tray),
                 default=True,
             ),
             pystray.MenuItem("Päivitä sää", lambda icon, item: self.after(0, self.refresh_weather)),
-            pystray.MenuItem(
-                "Tarkista sovelluspäivitys",
-                lambda icon, item: self.after(0, lambda: self.check_for_app_update(manual=True)),
-            ),
             pystray.MenuItem(
                 "Käynnistä tietokoneen käynnistyessä",
                 lambda icon, item: self.after(0, self._toggle_startup_from_tray),
@@ -1337,7 +1334,16 @@ class WeatherWidget(tk.Tk):
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Lopeta", lambda icon, item: self.after(0, self._quit_from_tray)),
-        )
+        ]
+        if not IS_FROZEN:
+            menu_items.insert(
+                2,
+                pystray.MenuItem(
+                    "Tarkista sovelluspäivitys",
+                    lambda icon, item: self.after(0, lambda: self.check_for_app_update(manual=True)),
+                ),
+            )
+        menu = pystray.Menu(*menu_items)
 
         tray_image = build_tray_symbol_icon(self.tray_symbol)
         self.tray_icon = pystray.Icon(APP_SLUG, tray_image, APP_NAME, menu)
