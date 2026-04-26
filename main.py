@@ -34,6 +34,7 @@ APP_SLUG = "weather-report"
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_TERMS_URL = "https://open-meteo.com/en/terms"
+WINDOWS_TASKBAR_SETTINGS_URI = "ms-settings:taskbar"
 REFRESH_INTERVAL_MS = 30 * 60 * 1000
 FRESH_WEATHER_MAX_AGE_MINUTES = 15
 UPDATE_CHECK_DELAY_MS = 10 * 1000
@@ -1332,6 +1333,10 @@ class WeatherWidget(tk.Tk):
                 "Luo pikakuvake työpöydälle",
                 lambda icon, item: self.after(0, self._create_desktop_shortcut_from_tray),
             ),
+            pystray.MenuItem(
+                "Näytä kuvakerivissä",
+                lambda icon, item: self.after(0, self._open_taskbar_icon_settings),
+            ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Lopeta", lambda icon, item: self.after(0, self._quit_from_tray)),
         ]
@@ -1374,6 +1379,19 @@ class WeatherWidget(tk.Tk):
             return
 
         self.status_var.set(f"Pikakuvake luotu: {shortcut_path.name}")
+
+    def _open_taskbar_icon_settings(self) -> None:
+        if os.name != "nt":
+            self.status_var.set("Kuvakerivin näkyvyys säädetään käyttöjärjestelmän asetuksista.")
+            return
+
+        try:
+            os.startfile(WINDOWS_TASKBAR_SETTINGS_URI)  # type: ignore[attr-defined] # noqa: S606
+        except OSError:
+            self.status_var.set("Tehtäväpalkin asetusten avaaminen epäonnistui.")
+            return
+
+        self.status_var.set("Asetuksissa: Muut ilmaisinalueen kuvakkeet -> Weather Report päälle.")
 
     def _refresh_startup_shortcut_if_enabled(self) -> None:
         if not is_startup_enabled():
