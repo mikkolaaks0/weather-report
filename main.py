@@ -98,6 +98,7 @@ POPUP_INPUT_BG = "#173B49"
 POPUP_CONTENT_PAD = 10
 POPUP_CORNER_RADIUS = 44
 POPUP_BG_OPACITY = 0.85
+FORECAST_ICON_SIZE = 46
 DEFAULT_POPUP_THEME = "petrol"
 POPUP_THEMES = {
     "petrol": {
@@ -2162,7 +2163,14 @@ class WeatherWidget(tk.Tk):
         self.close_button = self._create_icon_button(self.popup_bg_canvas, "✕", self._hide_popup)
         self._configure_canvas_weather_icon(self.hero_icon_label, "cloud", 92, 92, "☁", "#F5F8FF")
         for card in self.forecast_cards:
-            self._configure_canvas_weather_icon(card["icon"], "unknown", 42, 42, "•", TEXT_MUTED)
+            self._configure_canvas_weather_icon(
+                card["icon"],
+                "unknown",
+                FORECAST_ICON_SIZE,
+                FORECAST_ICON_SIZE,
+                "•",
+                TEXT_MUTED,
+            )
 
 
         self.location_entry_window = self.popup_bg_canvas.create_window(
@@ -2260,7 +2268,7 @@ class WeatherWidget(tk.Tk):
             card["icon_y"] = forecast_top + 17
             self.popup_bg_canvas.coords(card["day"], center_x, forecast_top)
             self.popup_bg_canvas.coords(card["icon"], center_x, card["icon_y"])
-            self.popup_bg_canvas.coords(card["temp"], center_x, forecast_top + 63)
+            self.popup_bg_canvas.coords(card["temp"], center_x, forecast_top + 68)
 
         self.popup_bg_canvas.coords(self.footer_label, width - pad, height - 9)
 
@@ -2658,6 +2666,8 @@ class WeatherWidget(tk.Tk):
         self.popup_bg_canvas.itemconfigure(self.today_sunset_time_label, text=sunset)
 
     def _apply_forecast_cards(self, daily: dict) -> None:
+        dates = daily.get("time", [])
+        code_list = daily.get("weather_code", [])
         t_min = daily.get("temperature_2m_min", [])
         t_max = daily.get("temperature_2m_max", [])
 
@@ -2666,7 +2676,14 @@ class WeatherWidget(tk.Tk):
             if data_index >= len(dates):
                 self.popup_bg_canvas.itemconfigure(card["day"], text="-")
                 self.popup_bg_canvas.coords(card["icon"], card.get("center_x", 0), card.get("icon_y", 0))
-                self._configure_canvas_weather_icon(card["icon"], "unknown", 42, 42, "•", TEXT_MUTED)
+                self._configure_canvas_weather_icon(
+                    card["icon"],
+                    "unknown",
+                    FORECAST_ICON_SIZE,
+                    FORECAST_ICON_SIZE,
+                    "•",
+                    TEXT_MUTED,
+                )
                 self.popup_bg_canvas.itemconfigure(card["temp"], text="--° / --°")
                 continue
 
@@ -2684,8 +2701,8 @@ class WeatherWidget(tk.Tk):
             self._configure_canvas_weather_icon(
                 card["icon"],
                 forecast_style.icon_key,
-                42,
-                42,
+                FORECAST_ICON_SIZE,
+                FORECAST_ICON_SIZE,
                 forecast_style.icon,
                 forecast_style.accent,
             )
