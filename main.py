@@ -1537,7 +1537,7 @@ class WeatherWidget(tk.Tk):
         self.popup_bg_photo = None
         self.weather_icon_photo_cache: dict[tuple[str, int, int], tk.PhotoImage] = {}
         self.rain_mm_umbrella_icon_photo = build_metric_icon_photo("umbrella", 14, 14)
-        self.rain_prob_drop_icon_photo = build_rain_probability_drop_icon()
+        self.rain_prob_drop_icon_photo = build_rain_probability_drop_icon(width=12, height=14)
         self.humidity_fog_icon_photo = build_humidity_fog_icon()
         self.wind_swirl_icon_photo = build_wind_swirl_icon()
         self.popup_bg_size: tuple[int, int, str] | None = None
