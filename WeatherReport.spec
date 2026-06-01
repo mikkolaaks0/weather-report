@@ -17,6 +17,8 @@ def add_data_dir(source_dir, destination):
 
 data_files = [
     ("README.md", "."),
+    ("LICENSE", "."),
+    ("THIRD_PARTY_NOTICES.md", "."),
     ("start_weather_app.bat", "."),
     ("start_weather_app.vbs", "."),
     ("assets/logo.png", "assets"),
