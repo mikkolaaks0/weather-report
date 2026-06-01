@@ -1,0 +1,1 @@
+Original Weather Report metric icon library. PNG files have transparent backgrounds and are alpha-trimmed/scaled by the Tkinter UI for rain amount, rain probability, humidity/fog, and wind rows. SVG files are editable source counterparts matching the weather icon style.

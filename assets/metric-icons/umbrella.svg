@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="umbrella metric icon">
+  <defs>
+    <filter id="shadow" x="-35%" y="-35%" width="170%" height="180%"><feDropShadow dx="5" dy="9" stdDeviation="7" flood-color="#0A2D52" flood-opacity=".36"/></filter>
+    <linearGradient id="blue" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#B9ECFF"/><stop offset=".52" stop-color="#58BDF7"/><stop offset="1" stop-color="#168DE1"/></linearGradient>
+  </defs>
+  <g filter="url(#shadow)"><path fill="url(#blue)" d="M32 126c8-50 48-84 96-84s88 34 96 84c-20-14-39-14-58 0-17-13-34-13-51 0-18-13-36-13-53 0-10-8-20-12-30-12Z"/><path fill="none" stroke="#EAF9FF" stroke-width="6" stroke-linecap="round" d="M128 130v79c0 15-10 25-24 20"/><path fill="none" stroke="#F6FDFF" stroke-width="5" opacity=".6" d="M48 111c23-43 68-61 120-45"/></g>
+</svg>

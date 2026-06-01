@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="wind metric icon">
+  <defs>
+    <filter id="shadow" x="-35%" y="-35%" width="170%" height="180%"><feDropShadow dx="5" dy="9" stdDeviation="7" flood-color="#0A2D52" flood-opacity=".36"/></filter>
+    <linearGradient id="blue" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#B9ECFF"/><stop offset=".52" stop-color="#58BDF7"/><stop offset="1" stop-color="#168DE1"/></linearGradient>
+  </defs>
+  <g filter="url(#shadow)" fill="none" stroke="#78CAFF" stroke-width="8" stroke-linecap="round"><path d="M34 86h120"/><path d="M24 132h166"/><path d="M56 178h82"/><path d="M126 86c54 0 76-48 22-48"/><path d="M158 132c61 0 88-50 28-50"/><path d="M116 178c42 0 61-38 21-38"/></g>
+</svg>

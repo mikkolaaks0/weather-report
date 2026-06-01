@@ -75,6 +75,7 @@ ASSETS_DIR = RUNTIME_DIR / "assets"
 APP_ICON_PATH = ASSETS_DIR / "app.ico"
 APP_LOGO_PATH = ASSETS_DIR / "logo.png"
 WEATHER_ICONS_DIR = ASSETS_DIR / "weather-icons"
+METRIC_ICONS_DIR = ASSETS_DIR / "metric-icons"
 FONTS_DIR = ASSETS_DIR / "fonts"
 EXO2_FONT_FILES = (
     FONTS_DIR / "Exo2-Regular.ttf",
@@ -435,6 +436,32 @@ def build_weather_tray_icon(icon_key: str):
     if image is None:
         return None
     return image
+
+
+def _metric_icon_path(icon_key: str) -> Path:
+    normalized = (icon_key or "").strip().lower().replace("_", "-")
+    return METRIC_ICONS_DIR / f"{normalized}.png"
+
+
+def _load_metric_icon_image(icon_key: str):
+    if Image is None:
+        return None
+
+    path = _metric_icon_path(icon_key)
+    try:
+        return Image.open(path).convert("RGBA")
+    except OSError:
+        return None
+
+
+def build_metric_icon_photo(icon_key: str, width: int, height: int):
+    if ImageTk is None:
+        return None
+
+    image = _resize_weather_icon_image(_load_metric_icon_image(icon_key), width, height)
+    if image is None:
+        return None
+    return ImageTk.PhotoImage(image)
 
 
 def _new_tray_icon_canvas(size: int = 256):
@@ -868,6 +895,10 @@ def build_popup_background_image(width: int, height: int, theme: dict, radius: i
 
 
 def build_humidity_fog_icon(width: int = 16, height: int = 14):
+    metric_icon = build_metric_icon_photo("fog", width, height)
+    if metric_icon is not None:
+        return metric_icon
+
     if Image is None or ImageDraw is None or ImageTk is None:
         return None
 
@@ -897,6 +928,10 @@ def build_humidity_fog_icon(width: int = 16, height: int = 14):
 
 
 def build_rain_probability_drop_icon(width: int = 12, height: int = 12):
+    metric_icon = build_metric_icon_photo("drop", width, height)
+    if metric_icon is not None:
+        return metric_icon
+
     if Image is None or ImageDraw is None or ImageTk is None:
         return None
 
@@ -951,6 +986,10 @@ def build_rain_probability_drop_icon(width: int = 12, height: int = 12):
 
 
 def build_wind_swirl_icon(width: int = 18, height: int = 14):
+    metric_icon = build_metric_icon_photo("wind", width, height)
+    if metric_icon is not None:
+        return metric_icon
+
     if Image is None or ImageDraw is None or ImageTk is None:
         return None
 
@@ -1497,6 +1536,7 @@ class WeatherWidget(tk.Tk):
         self.tray_symbol = "cloud"
         self.popup_bg_photo = None
         self.weather_icon_photo_cache: dict[tuple[str, int, int], tk.PhotoImage] = {}
+        self.rain_mm_umbrella_icon_photo = build_metric_icon_photo("umbrella", 14, 14)
         self.rain_prob_drop_icon_photo = build_rain_probability_drop_icon()
         self.humidity_fog_icon_photo = build_humidity_fog_icon()
         self.wind_swirl_icon_photo = build_wind_swirl_icon()
@@ -1952,14 +1992,22 @@ class WeatherWidget(tk.Tk):
             justify="right",
             state="hidden",
         )
-        self.today_rain_mm_icon_label = self.popup_bg_canvas.create_text(
-            0,
-            0,
-            text="☂",
-            anchor="ne",
-            font=(SYMBOL_FONT, 11),
-            fill="#F2F6FF",
-        )
+        if self.rain_mm_umbrella_icon_photo is not None:
+            self.today_rain_mm_icon_label = self.popup_bg_canvas.create_image(
+                0,
+                0,
+                image=self.rain_mm_umbrella_icon_photo,
+                anchor="ne",
+            )
+        else:
+            self.today_rain_mm_icon_label = self.popup_bg_canvas.create_text(
+                0,
+                0,
+                text="☂",
+                anchor="ne",
+                font=(SYMBOL_FONT, 11),
+                fill="#F2F6FF",
+            )
         self.today_rain_mm_value_label = self.popup_bg_canvas.create_text(
             0,
             0,
@@ -2643,6 +2691,10 @@ class WeatherWidget(tk.Tk):
         self.popup_bg_canvas.itemconfigure(self.today_rain_prob_value_label, text=rain_probability)
         self.popup_bg_canvas.itemconfigure(self.today_humidity_value_label, text=humidity)
         self.popup_bg_canvas.itemconfigure(self.today_wind_value_label, text=wind)
+        if self.rain_mm_umbrella_icon_photo is None:
+            self.popup_bg_canvas.itemconfigure(self.today_rain_mm_icon_label, text="☂", fill="#F2F6FF")
+        else:
+            self.popup_bg_canvas.itemconfigure(self.today_rain_mm_icon_label, image=self.rain_mm_umbrella_icon_photo)
         if self.rain_prob_drop_icon_photo is None:
             self.popup_bg_canvas.itemconfigure(self.today_rain_prob_icon_label, text="💧", fill="#8CC7FF")
         else:

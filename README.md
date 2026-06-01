@@ -9,6 +9,7 @@ from the system tray.
 - Dynamic weather icon in the Windows system tray
 - Compact popup with current conditions and a 6-day forecast
 - Bundled Fluent-style weather icons for the tray, card, and forecast panel
+- Bundled metric icons for rain amount, rain probability, humidity, and wind rows
 - Bundled Exo 2 app font; no separate font installation is required
 - City search with saved settings
 - Temperature, daily high/low, precipitation, humidity, wind, sunrise and sunset
@@ -93,6 +94,9 @@ Release artifacts are written to `release/`.
 Weather Report ships with its own transparent PNG/SVG weather icon set under
 `assets/weather-icons/`. The Tkinter UI alpha-trims and scales these assets for
 the compact card, forecast panel, and Windows tray icon.
+
+Metric row icons live under `assets/metric-icons/` and use the same visual style
+for rain amount, rain probability, humidity/fog, and wind indicators.
 
 The app also bundles the Exo 2 font under `assets/fonts/` and registers it as a
 private runtime font on Windows. Users do not need to install the font manually.

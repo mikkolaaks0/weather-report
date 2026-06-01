@@ -31,6 +31,7 @@ for filename, destination in data_files:
         datas.append((str(file_path), destination))
 
 add_data_dir(project_dir / "assets" / "weather-icons", "assets/weather-icons")
+add_data_dir(project_dir / "assets" / "metric-icons", "assets/metric-icons")
 add_data_dir(project_dir / "assets" / "fonts", "assets/fonts")
 
 
