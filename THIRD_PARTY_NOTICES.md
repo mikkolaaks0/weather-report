@@ -16,6 +16,11 @@ This project uses third-party services and libraries.
 - Project: https://github.com/python-pillow/Pillow
 - License file: https://github.com/python-pillow/Pillow/blob/main/LICENSE
 
+## Exo 2
+- Project: https://github.com/NDISCOVER/Exo-2.0
+- License: SIL Open Font License 1.1
+- Bundled license: assets/fonts/OFL-Exo2.txt
+
 ## PyInstaller (build/distribution tool)
 - Project: https://github.com/pyinstaller/pyinstaller
 - License: GPL-2.0-or-later with a special exception

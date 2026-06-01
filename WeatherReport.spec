@@ -4,6 +4,17 @@ from pathlib import Path
 project_dir = Path(SPECPATH).resolve()
 
 datas = []
+
+
+def add_data_dir(source_dir, destination):
+    if not source_dir.exists():
+        return
+
+    for file_path in source_dir.iterdir():
+        if file_path.is_file():
+            datas.append((str(file_path), destination))
+
+
 data_files = [
     ("README.md", "."),
     ("start_weather_app.bat", "."),
@@ -16,6 +27,9 @@ for filename, destination in data_files:
     file_path = project_dir / filename
     if file_path.exists():
         datas.append((str(file_path), destination))
+
+add_data_dir(project_dir / "assets" / "weather-icons", "assets/weather-icons")
+add_data_dir(project_dir / "assets" / "fonts", "assets/fonts")
 
 
 a = Analysis(

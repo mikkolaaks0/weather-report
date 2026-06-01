@@ -1,0 +1,1 @@
+Original Weather Report weather icon library. PNG files have transparent backgrounds and are alpha-trimmed/scaled by the Tkinter UI for card and tray rendering. SVG files are editable source counterparts. The visual direction follows Fluent-style dimensional weather icons without embedding external artwork.

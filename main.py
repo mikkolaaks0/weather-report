@@ -7,6 +7,7 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import messagebox
@@ -73,6 +74,14 @@ SETTINGS_PATH = _settings_dir / "weather_settings.json"
 ASSETS_DIR = RUNTIME_DIR / "assets"
 APP_ICON_PATH = ASSETS_DIR / "app.ico"
 APP_LOGO_PATH = ASSETS_DIR / "logo.png"
+WEATHER_ICONS_DIR = ASSETS_DIR / "weather-icons"
+FONTS_DIR = ASSETS_DIR / "fonts"
+EXO2_FONT_FILES = (
+    FONTS_DIR / "Exo2-Regular.ttf",
+    FONTS_DIR / "Exo2-SemiBold.ttf",
+    FONTS_DIR / "Exo2-Bold.ttf",
+)
+APP_FONTS_REGISTERED = False
 STARTUP_SHORTCUT_NAME = f"{APP_SLUG}.lnk"
 DESKTOP_SHORTCUT_NAME = f"{APP_NAME}.lnk"
 
@@ -213,8 +222,9 @@ POPUP_THEMES = {
     },
 }
 
-DISPLAY_FONT = "Segoe UI Variable Display"
-TEXT_FONT = "Segoe UI Variable Text"
+APP_FONT_FAMILY = "Exo 2"
+DISPLAY_FONT = APP_FONT_FAMILY
+TEXT_FONT = APP_FONT_FAMILY
 SYMBOL_FONT = "Segoe UI Symbol"
 EMOJI_FONT = "Segoe UI Emoji"
 
@@ -227,6 +237,88 @@ WEEKDAY_SHORT_FI = {
     5: "La",
     6: "Su",
 }
+
+
+@dataclass(frozen=True)
+class WeatherStyle:
+    icon: str
+    icon_key: str
+    label: str
+    accent: str
+
+
+WEATHER_ICON_ALIASES = {
+    "sun": "sun",
+    "clear": "sun",
+    "day": "sun",
+    "☀": "sun",
+    "☀️": "sun",
+    "moon": "moon",
+    "night": "moon",
+    "☾": "moon",
+    "☽": "moon",
+    "🌙": "moon",
+    "partly_cloudy": "partly-cloudy",
+    "partly-cloudy": "partly-cloudy",
+    "⛅": "partly-cloudy",
+    "cloud": "cloud",
+    "cloudy": "cloudy",
+    "☁": "cloud",
+    "fog": "fog",
+    "mist": "fog",
+    "🌫": "fog",
+    "showers": "showers",
+    "drizzle": "showers",
+    "🌦": "showers",
+    "rain": "rain",
+    "☂": "rain",
+    "🌧": "rain",
+    "snow": "snow",
+    "❄": "snow",
+    "thunder": "thunder",
+    "storm": "thunder",
+    "⛈": "thunder",
+    "⚡": "thunder",
+    "unknown": "unknown",
+    "•": "unknown",
+}
+
+
+def register_app_fonts() -> None:
+    global APP_FONTS_REGISTERED
+
+    if APP_FONTS_REGISTERED:
+        return
+
+    if os.name != "nt":
+        APP_FONTS_REGISTERED = True
+        return
+
+    try:
+        import ctypes
+    except Exception:  # noqa: BLE001
+        APP_FONTS_REGISTERED = True
+        return
+
+    try:
+        add_font_resource = ctypes.windll.gdi32.AddFontResourceExW
+        add_font_resource.argtypes = [ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_void_p]
+        add_font_resource.restype = ctypes.c_int
+    except Exception:  # noqa: BLE001
+        APP_FONTS_REGISTERED = True
+        return
+    private_font = 0x10
+
+    for font_path in EXO2_FONT_FILES:
+        if not font_path.exists():
+            continue
+        try:
+            add_font_resource(str(font_path), private_font, None)
+        except Exception:  # noqa: BLE001
+            continue
+
+    APP_FONTS_REGISTERED = True
+
 
 def _load_text_font(size: int):
     if ImageFont is None:
@@ -263,24 +355,64 @@ def _load_symbol_font(size: int):
 
 
 def _normalize_tray_symbol(symbol_text: str) -> str:
-    symbol = (symbol_text or "").strip()
-    mapping = {
-        "☀": "sun",
-        "☾": "moon",
-        "☽": "moon",
-        "🌙": "moon",
-        "⛅": "partly_cloudy",
-        "☁": "cloud",
-        "🌫": "fog",
-        "🌦": "showers",
-        "🌧": "rain",
-        "☂": "rain",
-        "❄": "snow",
-        "⛈": "thunder",
-        "⚡": "thunder",
-        "•": "unknown",
-    }
-    return mapping.get(symbol, "cloud")
+    return WEATHER_ICON_ALIASES.get((symbol_text or "").strip(), "cloud")
+
+
+def _weather_icon_path(icon_key: str) -> Path:
+    normalized = WEATHER_ICON_ALIASES.get((icon_key or "").strip(), "cloud")
+    return WEATHER_ICONS_DIR / f"{normalized}.png"
+
+
+def _trim_transparent_margins(image):
+    if image is None or "A" not in image.getbands():
+        return image
+
+    alpha = image.getchannel("A").point(lambda value: 255 if value > 3 else 0)
+    bbox = alpha.getbbox()
+    if not bbox:
+        return image
+    return image.crop(bbox)
+
+
+def _load_weather_icon_image(icon_key: str):
+    if Image is None:
+        return None
+
+    path = _weather_icon_path(icon_key)
+    if not path.exists():
+        path = _weather_icon_path("cloud")
+    try:
+        return Image.open(path).convert("RGBA")
+    except OSError:
+        return None
+
+
+def _resize_weather_icon_image(image, width: int, height: int):
+    if Image is None or image is None:
+        return None
+
+    width = max(1, int(width))
+    height = max(1, int(height))
+    resampling = getattr(Image, "Resampling", Image)
+    image = _trim_transparent_margins(image)
+    return image.resize((width, height), resampling.LANCZOS)
+
+
+def build_weather_icon_photo(icon_key: str, width: int, height: int):
+    if ImageTk is None:
+        return None
+
+    image = _resize_weather_icon_image(_load_weather_icon_image(icon_key), width, height)
+    if image is None:
+        return None
+    return ImageTk.PhotoImage(image)
+
+
+def build_weather_tray_icon(icon_key: str):
+    image = _resize_weather_icon_image(_load_weather_icon_image(icon_key), 64, 64)
+    if image is None:
+        return None
+    return image
 
 
 def _new_tray_icon_canvas(size: int = 256):
@@ -577,9 +709,14 @@ def build_tray_symbol_icon(symbol_text: str):
         return None
 
     symbol = _normalize_tray_symbol(symbol_text)
+    asset_icon = build_weather_tray_icon(symbol)
+    if asset_icon is not None:
+        return asset_icon
+
     builders = {
         "sun": _build_tray_sun_icon,
         "moon": _build_tray_crescent_icon,
+        "partly-cloudy": _build_tray_partly_cloudy_icon,
         "partly_cloudy": _build_tray_partly_cloudy_icon,
         "cloud": _build_tray_cloud_icon,
         "fog": _build_tray_fog_icon,
@@ -598,8 +735,10 @@ def build_tray_symbol_icon(symbol_text: str):
     fallback_symbol = {
         "sun": "☀",
         "moon": "🌙",
+        "partly-cloudy": "⛅",
         "partly_cloudy": "⛅",
         "cloud": "☁",
+        "cloudy": "☁",
         "fog": "☁",
         "showers": "☂",
         "rain": "☂",
@@ -912,24 +1051,29 @@ def get_weather(latitude: float, longitude: float, temperature_unit: str = "cels
     )
 
 
-def resolve_weather_style(code: int | None, is_day: bool = True) -> dict:
+def resolve_weather_style(code: int | None, is_day: bool = True) -> WeatherStyle:
     if code == 0:
-        return {"icon": "☀" if is_day else "🌙", "label": "Selkeää", "accent": ACCENT_GOLD}
+        return WeatherStyle(
+            icon="☀" if is_day else "🌙",
+            icon_key="sun" if is_day else "moon",
+            label="Selkeää",
+            accent=ACCENT_GOLD,
+        )
     if code in {1, 2}:
-        return {"icon": "⛅", "label": "Puolipilvistä", "accent": "#E9C37A"}
+        return WeatherStyle(icon="⛅", icon_key="partly-cloudy", label="Puolipilvistä", accent="#E9C37A")
     if code == 3:
-        return {"icon": "☁", "label": "Pilvistä", "accent": "#D6DEEA"}
+        return WeatherStyle(icon="☁", icon_key="cloudy", label="Pilvistä", accent="#D6DEEA")
     if code in {45, 48}:
-        return {"icon": "🌫", "label": "Sumua", "accent": "#BCC8D7"}
+        return WeatherStyle(icon="🌫", icon_key="fog", label="Sumua", accent="#BCC8D7")
     if code in {51, 53, 55, 56, 57}:
-        return {"icon": "🌦", "label": "Tihkua", "accent": "#8CC7FF"}
+        return WeatherStyle(icon="🌦", icon_key="showers", label="Tihkua", accent="#8CC7FF")
     if code in {61, 63, 65, 66, 67, 80, 81, 82}:
-        return {"icon": "🌧", "label": "Sadetta", "accent": ACCENT_BLUE}
+        return WeatherStyle(icon="🌧", icon_key="rain", label="Sadetta", accent=ACCENT_BLUE)
     if code in {71, 73, 75, 77, 85, 86}:
-        return {"icon": "❄", "label": "Lumisadetta", "accent": "#BEE9FF"}
+        return WeatherStyle(icon="❄", icon_key="snow", label="Lumisadetta", accent="#BEE9FF")
     if code in {95, 96, 99}:
-        return {"icon": "⛈", "label": "Ukkosta", "accent": ACCENT_LAVENDER}
-    return {"icon": "•", "label": "Tuntematon", "accent": "#D5DAE3"}
+        return WeatherStyle(icon="⛈", icon_key="thunder", label="Ukkosta", accent=ACCENT_LAVENDER)
+    return WeatherStyle(icon="•", icon_key="unknown", label="Tuntematon", accent="#D5DAE3")
 
 
 def format_temperature(value: float | int | None, unit_symbol: str) -> str:
@@ -1244,6 +1388,7 @@ def restart_application() -> None:
 
 class WeatherWidget(tk.Tk):
     def __init__(self) -> None:
+        register_app_fonts()
         super().__init__()
 
         self.settings = load_settings()
@@ -1270,8 +1415,9 @@ class WeatherWidget(tk.Tk):
         self.latest_weather: dict | None = None
         self.last_weather_update: datetime | None = None
         self.tray_icon = None
-        self.tray_symbol = "☁"
+        self.tray_symbol = "cloud"
         self.popup_bg_photo = None
+        self.weather_icon_photo_cache: dict[tuple[str, int, int], tk.PhotoImage] = {}
         self.rain_prob_drop_icon_photo = build_rain_probability_drop_icon()
         self.humidity_fog_icon_photo = build_humidity_fog_icon()
         self.wind_swirl_icon_photo = build_wind_swirl_icon()
@@ -1310,6 +1456,52 @@ class WeatherWidget(tk.Tk):
                 self.iconbitmap(str(APP_ICON_PATH))
             except tk.TclError:
                 pass
+
+    def _weather_icon_photo(self, icon_key: str, width: int, height: int):
+        normalized = WEATHER_ICON_ALIASES.get((icon_key or "").strip(), "cloud")
+        cache_key = (normalized, int(width), int(height))
+        cached = self.weather_icon_photo_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        photo = build_weather_icon_photo(normalized, width, height)
+        if photo is not None:
+            self.weather_icon_photo_cache[cache_key] = photo
+        return photo
+
+    def _configure_weather_label(
+        self,
+        label: tk.Label,
+        icon_key: str,
+        width: int,
+        height: int,
+        fallback_symbol: str,
+        accent: str,
+    ) -> None:
+        photo = self._weather_icon_photo(icon_key, width, height)
+        if photo is not None:
+            label.config(image=photo, text="", width=width, height=height)
+            return
+
+        label.config(image="", text=fallback_symbol, width=0, height=0, fg=accent)
+
+    def _configure_canvas_weather_icon(
+        self,
+        item_id: int,
+        icon_key: str,
+        width: int,
+        height: int,
+        fallback_symbol: str,
+        accent: str,
+    ) -> None:
+        photo = self._weather_icon_photo(icon_key, width, height)
+        item_type = self.popup_bg_canvas.type(item_id)
+        if photo is not None and item_type == "image":
+            self.popup_bg_canvas.itemconfigure(item_id, image=photo, state="normal")
+            return
+
+        if item_type == "text":
+            self.popup_bg_canvas.itemconfigure(item_id, text=fallback_symbol, fill=accent, state="normal")
 
     def _init_tray_icon(self) -> None:
         if pystray is None or Image is None or ImageDraw is None or ImageOps is None:
@@ -1542,10 +1734,11 @@ class WeatherWidget(tk.Tk):
 
         self.widget_icon_label = tk.Label(
             pill_row,
-            text="🌙",
-            font=(EMOJI_FONT, 18),
+            text="",
             fg=ACCENT_GOLD,
             bg=SURFACE_BG,
+            width=42,
+            height=42,
         )
         self.widget_icon_label.pack(side="left")
         self.widget_icon_label.bind("<Button-1>", lambda _event: self.toggle_popup())
@@ -1585,6 +1778,7 @@ class WeatherWidget(tk.Tk):
 
         self._create_icon_button(right, "⟳", self.refresh_weather).pack(side="top")
         self._create_icon_button(right, "✕", self.destroy).pack(side="top", pady=(8, 0))
+        self._configure_weather_label(self.widget_icon_label, "moon", 42, 42, "🌙", ACCENT_GOLD)
 
     def _build_popup(self) -> None:
         self.popup = tk.Toplevel(self)
@@ -1656,13 +1850,10 @@ class WeatherWidget(tk.Tk):
             font=(TEXT_FONT, 18, "bold"),
             fill="#F3F7FF",
         )
-        self.hero_icon_label = self.popup_bg_canvas.create_text(
+        self.hero_icon_label = self.popup_bg_canvas.create_image(
             0,
             0,
-            text="☁",
             anchor="w",
-            font=(EMOJI_FONT, 42),
-            fill="#F5F8FF",
         )
         self.hero_temp_label = self.popup_bg_canvas.create_text(
             0,
@@ -1849,22 +2040,10 @@ class WeatherWidget(tk.Tk):
                 font=(TEXT_FONT, 9, "bold"),
                 fill="#DDE7FF",
             )
-            sun_id = self.popup_bg_canvas.create_text(
+            icon_id = self.popup_bg_canvas.create_image(
                 0,
                 0,
-                text="☀️",
                 anchor="n",
-                font=(EMOJI_FONT, 14),
-                fill=ACCENT_GOLD,
-                state="hidden",
-            )
-            icon_id = self.popup_bg_canvas.create_text(
-                0,
-                0,
-                text="•",
-                anchor="n",
-                font=(EMOJI_FONT, 24),
-                fill="#CDE0FF",
             )
             temp_id = self.popup_bg_canvas.create_text(
                 0,
@@ -1874,7 +2053,7 @@ class WeatherWidget(tk.Tk):
                 font=(TEXT_FONT, 11),
                 fill="#F3F7FF",
             )
-            self.forecast_cards.append({"day": day_id, "sun": sun_id, "icon": icon_id, "temp": temp_id})
+            self.forecast_cards.append({"day": day_id, "icon": icon_id, "temp": temp_id})
 
         self.location_entry_shell = tk.Frame(
             self.popup_bg_canvas,
@@ -1903,6 +2082,9 @@ class WeatherWidget(tk.Tk):
         self.search_button = self._create_icon_button(self.popup_bg_canvas, "Hae", self._search_from_popup, width=4)
         self.refresh_button = self._create_icon_button(self.popup_bg_canvas, "⟳", self.refresh_weather)
         self.close_button = self._create_icon_button(self.popup_bg_canvas, "✕", self._hide_popup)
+        self._configure_canvas_weather_icon(self.hero_icon_label, "cloud", 92, 92, "☁", "#F5F8FF")
+        for card in self.forecast_cards:
+            self._configure_canvas_weather_icon(card["icon"], "unknown", 42, 42, "•", TEXT_MUTED)
 
 
         self.location_entry_window = self.popup_bg_canvas.create_window(
@@ -1997,10 +2179,8 @@ class WeatherWidget(tk.Tk):
         for index, card in enumerate(self.forecast_cards):
             center_x = int(forecast_left + (index + 0.5) * col_width)
             card["center_x"] = center_x
-            card["sun_y"] = forecast_top + 15
             card["icon_y"] = forecast_top + 17
             self.popup_bg_canvas.coords(card["day"], center_x, forecast_top)
-            self.popup_bg_canvas.coords(card["sun"], center_x - 8, card["sun_y"])
             self.popup_bg_canvas.coords(card["icon"], center_x, card["icon_y"])
             self.popup_bg_canvas.coords(card["temp"], center_x, forecast_top + 63)
 
@@ -2319,9 +2499,9 @@ class WeatherWidget(tk.Tk):
             style = resolve_weather_style(current.get("weather_code"), current.get("is_day", 1) == 1)
             city_text = format_city(self.latest_place) if isinstance(self.latest_place, dict) else self.city_var.get()
             current_temp = format_temperature(current.get("temperature_2m"), self.unit_symbol)
-            self._update_tray_symbol(style["icon"], f"{city_text}: {current_temp} (päivitys epäonnistui)")
+            self._update_tray_symbol(style.icon_key, f"{city_text}: {current_temp} (päivitys epäonnistui)")
         else:
-            self._update_tray_symbol("•", f"{APP_NAME}: päivitys epäonnistui")
+            self._update_tray_symbol("unknown", f"{APP_NAME}: päivitys epäonnistui")
         if not self.latest_weather:
             messagebox.showerror(APP_NAME, text)
         self._schedule_refresh()
@@ -2330,6 +2510,108 @@ class WeatherWidget(tk.Tk):
         if self.refresh_job is not None:
             self.after_cancel(self.refresh_job)
         self.refresh_job = self.after(REFRESH_INTERVAL_MS, self.refresh_weather)
+
+    def _apply_current_weather_summary(
+        self,
+        style: WeatherStyle,
+        current_temp: str,
+        city_text: str,
+        updated_text: str,
+    ) -> None:
+        self._configure_weather_label(
+            self.widget_icon_label,
+            style.icon_key,
+            42,
+            42,
+            style.icon,
+            style.accent,
+        )
+        self.widget_temp_label.config(text=current_temp)
+        self.widget_city_label.config(text=city_text)
+        self.widget_condition_label.config(text=style.label)
+
+        self._configure_canvas_weather_icon(
+            self.hero_icon_label,
+            style.icon_key,
+            92,
+            92,
+            style.icon,
+            style.accent,
+        )
+        self.popup_bg_canvas.itemconfigure(self.hero_temp_label, text=current_temp)
+        self.popup_bg_canvas.itemconfigure(self.hero_city_label, text=city_text)
+        self.popup_bg_canvas.itemconfigure(self.hero_updated_label, text=updated_text)
+
+    def _apply_today_detail_metrics(
+        self,
+        condition_label: str,
+        high_low_text: str,
+        rain_mm: str,
+        rain_probability: str,
+        humidity: str,
+        wind: str,
+        sunrise: str,
+        sunset: str,
+    ) -> None:
+        self.popup_bg_canvas.itemconfigure(self.today_rain_mm_value_label, text=rain_mm)
+        self.popup_bg_canvas.itemconfigure(self.today_rain_prob_value_label, text=rain_probability)
+        self.popup_bg_canvas.itemconfigure(self.today_humidity_value_label, text=humidity)
+        self.popup_bg_canvas.itemconfigure(self.today_wind_value_label, text=wind)
+        if self.rain_prob_drop_icon_photo is None:
+            self.popup_bg_canvas.itemconfigure(self.today_rain_prob_icon_label, text="💧", fill="#8CC7FF")
+        else:
+            self.popup_bg_canvas.itemconfigure(self.today_rain_prob_icon_label, image=self.rain_prob_drop_icon_photo)
+        if self.wind_swirl_icon_photo is None:
+            self.popup_bg_canvas.itemconfigure(self.today_wind_icon_label, text="🌬", fill="#F2F6FF")
+        else:
+            self.popup_bg_canvas.itemconfigure(self.today_wind_icon_label, image=self.wind_swirl_icon_photo)
+
+        stats_right = self.popup_bg_canvas.coords(self.today_condition_label)
+        right_x = int(stats_right[0]) if stats_right else (self.popup.winfo_width() - (POPUP_CONTENT_PAD + 22))
+        stats_top = self.popup_bg_canvas.coords(self.today_rain_mm_value_label)
+        top_y = int(stats_top[1]) if stats_top else 61
+        self._layout_today_stats(right_x, top_y)
+
+        self.popup_bg_canvas.itemconfigure(self.today_condition_label, text=condition_label)
+        self.popup_bg_canvas.itemconfigure(self.today_hilo_label, text=high_low_text)
+        self.popup_bg_canvas.itemconfigure(self.today_sun_icon_label, text="☀️", fill=ACCENT_GOLD)
+        self.popup_bg_canvas.itemconfigure(self.today_sunrise_time_label, text=sunrise)
+        self.popup_bg_canvas.itemconfigure(self.today_moon_icon_label, text="🌙", fill=ACCENT_GOLD)
+        self.popup_bg_canvas.itemconfigure(self.today_sunset_time_label, text=sunset)
+
+    def _apply_forecast_cards(self, daily: dict) -> None:
+        t_min = daily.get("temperature_2m_min", [])
+        t_max = daily.get("temperature_2m_max", [])
+
+        for index, card in enumerate(self.forecast_cards):
+            data_index = index + 1
+            if data_index >= len(dates):
+                self.popup_bg_canvas.itemconfigure(card["day"], text="-")
+                self.popup_bg_canvas.coords(card["icon"], card.get("center_x", 0), card.get("icon_y", 0))
+                self._configure_canvas_weather_icon(card["icon"], "unknown", 42, 42, "•", TEXT_MUTED)
+                self.popup_bg_canvas.itemconfigure(card["temp"], text="--° / --°")
+                continue
+
+            forecast_style = resolve_weather_style(code_list[data_index] if data_index < len(code_list) else None, True)
+            high = format_temperature(t_max[data_index] if data_index < len(t_max) else None, self.unit_symbol)
+            low = format_temperature(t_min[data_index] if data_index < len(t_min) else None, self.unit_symbol)
+            try:
+                day_index = datetime.strptime(dates[data_index], "%Y-%m-%d").weekday()
+                day_label = WEEKDAY_SHORT_FI.get(day_index, "-")
+            except ValueError:
+                day_label = "-"
+
+            self.popup_bg_canvas.itemconfigure(card["day"], text=day_label)
+            self.popup_bg_canvas.coords(card["icon"], card.get("center_x", 0), card.get("icon_y", 0))
+            self._configure_canvas_weather_icon(
+                card["icon"],
+                forecast_style.icon_key,
+                42,
+                42,
+                forecast_style.icon,
+                forecast_style.accent,
+            )
+            self.popup_bg_canvas.itemconfigure(card["temp"], text=f"{high} / {low}")
 
     def _apply_weather(self, place: dict, weather: dict) -> None:
         self.fetch_in_progress = False
@@ -2381,85 +2663,25 @@ class WeatherWidget(tk.Tk):
         today_sunrise = format_time_short(sunrise_list[0] if sunrise_list else None)
         today_sunset = format_time_short(sunset_list[0] if sunset_list else None)
 
-        self.widget_icon_label.config(text=style["icon"], fg=style["accent"])
-        self.widget_temp_label.config(text=current_temp)
-        self.widget_city_label.config(text=city_text)
-        self.widget_condition_label.config(text=style["label"])
-
-        self.popup_bg_canvas.itemconfigure(self.hero_icon_label, text=style["icon"], fill=style["accent"])
-        self.popup_bg_canvas.itemconfigure(self.hero_temp_label, text=current_temp)
-        self.popup_bg_canvas.itemconfigure(self.hero_city_label, text=city_text)
-        self.popup_bg_canvas.itemconfigure(self.hero_updated_label, text=f"Päivitetty {now_text}")
-
         wind_text = f"{wind_speed_ms} ({wind_direction})"
-        self.popup_bg_canvas.itemconfigure(self.today_rain_mm_value_label, text=today_rain_mm)
-        self.popup_bg_canvas.itemconfigure(self.today_rain_prob_value_label, text=today_rain_prob)
-        self.popup_bg_canvas.itemconfigure(self.today_humidity_value_label, text=humidity_pct)
-        self.popup_bg_canvas.itemconfigure(self.today_wind_value_label, text=wind_text)
-        if self.rain_prob_drop_icon_photo is None:
-            self.popup_bg_canvas.itemconfigure(self.today_rain_prob_icon_label, text="💧", fill="#8CC7FF")
-        else:
-            self.popup_bg_canvas.itemconfigure(self.today_rain_prob_icon_label, image=self.rain_prob_drop_icon_photo)
-        if self.wind_swirl_icon_photo is None:
-            self.popup_bg_canvas.itemconfigure(self.today_wind_icon_label, text="🌬", fill="#F2F6FF")
-        else:
-            self.popup_bg_canvas.itemconfigure(self.today_wind_icon_label, image=self.wind_swirl_icon_photo)
-        stats_right = self.popup_bg_canvas.coords(self.today_condition_label)
-        right_x = int(stats_right[0]) if stats_right else (self.popup.winfo_width() - (POPUP_CONTENT_PAD + 22))
-        stats_top = self.popup_bg_canvas.coords(self.today_rain_mm_value_label)
-        top_y = int(stats_top[1]) if stats_top else 61
-        self._layout_today_stats(right_x, top_y)
-        self.popup_bg_canvas.itemconfigure(self.today_condition_label, text=style["label"])
-        self.popup_bg_canvas.itemconfigure(self.today_hilo_label, text=f"ylin {today_high} / alin {today_low}")
-        self.popup_bg_canvas.itemconfigure(self.today_sun_icon_label, text="☀️", fill=ACCENT_GOLD)
-        self.popup_bg_canvas.itemconfigure(self.today_sunrise_time_label, text=today_sunrise)
-        self.popup_bg_canvas.itemconfigure(self.today_moon_icon_label, text="🌙", fill=ACCENT_GOLD)
-        self.popup_bg_canvas.itemconfigure(self.today_sunset_time_label, text=today_sunset)
+        self._apply_current_weather_summary(style, current_temp, city_text, f"Päivitetty {now_text}")
+        self._apply_today_detail_metrics(
+            condition_label=style.label,
+            high_low_text=f"ylin {today_high} / alin {today_low}",
+            rain_mm=today_rain_mm,
+            rain_probability=today_rain_prob,
+            humidity=humidity_pct,
+            wind=wind_text,
+            sunrise=today_sunrise,
+            sunset=today_sunset,
+        )
 
         self.status_var.set("")
-        self._update_tray_symbol(style["icon"], f"{city_text}: {current_temp} {style['label']}")
+        self._update_tray_symbol(style.icon_key, f"{city_text}: {current_temp} {style.label}")
         self.detail_city_var.set(place.get("name", self.city_var.get()))
         self.startup_var.set(is_startup_enabled())
 
-        for index, card in enumerate(self.forecast_cards):
-            data_index = index + 1
-            if data_index >= len(dates):
-                self.popup_bg_canvas.itemconfigure(card["day"], text="-")
-                self.popup_bg_canvas.itemconfigure(card["sun"], state="hidden")
-                self.popup_bg_canvas.coords(card["icon"], card.get("center_x", 0), card.get("icon_y", 0))
-                self.popup_bg_canvas.itemconfigure(card["icon"], text="•", fill=TEXT_MUTED)
-                self.popup_bg_canvas.itemconfigure(card["temp"], text="--° / --°")
-                continue
-
-            forecast_style = resolve_weather_style(code_list[data_index] if data_index < len(code_list) else None, True)
-            high = format_temperature(t_max[data_index] if data_index < len(t_max) else None, self.unit_symbol)
-            low = format_temperature(t_min[data_index] if data_index < len(t_min) else None, self.unit_symbol)
-            try:
-                day_index = datetime.strptime(dates[data_index], "%Y-%m-%d").weekday()
-                day_label = WEEKDAY_SHORT_FI.get(day_index, "-")
-            except ValueError:
-                day_label = "-"
-
-            self.popup_bg_canvas.itemconfigure(card["day"], text=day_label)
-            if forecast_style["icon"] == "🌦":
-                self.popup_bg_canvas.itemconfigure(card["sun"], text="☀️", fill=ACCENT_GOLD, state="normal")
-                self.popup_bg_canvas.coords(card["sun"], card.get("center_x", 0) - 8, card.get("sun_y", 0))
-                self.popup_bg_canvas.coords(card["icon"], card.get("center_x", 0) + 3, card.get("icon_y", 0))
-                self.popup_bg_canvas.itemconfigure(card["icon"], text="🌧", fill=forecast_style["accent"])
-            elif forecast_style["icon"] == "⛅":
-                self.popup_bg_canvas.itemconfigure(card["sun"], text="☀️", fill=ACCENT_GOLD, state="normal")
-                self.popup_bg_canvas.coords(card["sun"], card.get("center_x", 0) - 8, card.get("sun_y", 0))
-                self.popup_bg_canvas.coords(card["icon"], card.get("center_x", 0) + 3, card.get("icon_y", 0))
-                self.popup_bg_canvas.itemconfigure(card["icon"], text="☁", fill="#D6DEEA")
-            else:
-                self.popup_bg_canvas.itemconfigure(card["sun"], state="hidden")
-                self.popup_bg_canvas.coords(card["icon"], card.get("center_x", 0), card.get("icon_y", 0))
-                self.popup_bg_canvas.itemconfigure(
-                    card["icon"],
-                    text=forecast_style["icon"],
-                    fill=forecast_style["accent"],
-                )
-            self.popup_bg_canvas.itemconfigure(card["temp"], text=f"{high} / {low}")
+        self._apply_forecast_cards(daily)
 
         self.popup_bg_canvas.itemconfigure(self.footer_label, text="Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot")
         self._schedule_refresh()
