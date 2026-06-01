@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="snow-grains weather icon">
+  <defs>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx="0" dy="10" stdDeviation="7" flood-color="#176097" flood-opacity=".34"/></filter>
+    <linearGradient id="sun" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#FFE978"/><stop offset="1" stop-color="#FF9E00"/></linearGradient>
+    <linearGradient id="moon" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#FFE91F"/><stop offset="1" stop-color="#FFB700"/></linearGradient>
+    <linearGradient id="cloud" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#F8FDFF"/><stop offset="1" stop-color="#C9E0ED"/></linearGradient>
+    <linearGradient id="rearCloud" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#BFD9EA"/><stop offset="1" stop-color="#8FB4CC"/></linearGradient>
+    <linearGradient id="drop" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#B6EAFF"/><stop offset=".48" stop-color="#5BBDF8"/><stop offset="1" stop-color="#168DE1"/></linearGradient>
+  </defs>
+  <path filter="url(#shadow)" fill="url(#cloud)" d="M55 181h130c26 0 45-17 45-40 0-21-17-38-39-38-10-25-34-43-63-43-32 0-58 21-65 50-22 2-39 18-39 38 0 19 14 33 31 33Z"/><circle filter="url(#shadow)" cx="88" cy="190" r="14.0" fill="#7EC9F7"/><ellipse cx="83.3" cy="184.5" rx="5.5" ry="4.7" fill="#F1FCFF" opacity=".7"/><circle filter="url(#shadow)" cx="126" cy="178" r="15.5" fill="#7EC9F7"/><ellipse cx="120.8" cy="172.0" rx="6.0" ry="5.2" fill="#F1FCFF" opacity=".7"/><circle filter="url(#shadow)" cx="164" cy="190" r="13.0" fill="#7EC9F7"/><ellipse cx="159.7" cy="185.0" rx="5.0" ry="4.3" fill="#F1FCFF" opacity=".7"/><circle filter="url(#shadow)" cx="145" cy="211" r="10.4" fill="#7EC9F7"/><ellipse cx="141.5" cy="206.9" rx="4.1" ry="3.5" fill="#F1FCFF" opacity=".7"/>
+</svg>

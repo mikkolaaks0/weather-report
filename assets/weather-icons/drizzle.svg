@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="drizzle weather icon">
+  <defs>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx="0" dy="10" stdDeviation="7" flood-color="#176097" flood-opacity=".34"/></filter>
+    <linearGradient id="sun" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#FFE978"/><stop offset="1" stop-color="#FF9E00"/></linearGradient>
+    <linearGradient id="moon" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#FFE91F"/><stop offset="1" stop-color="#FFB700"/></linearGradient>
+    <linearGradient id="cloud" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#F8FDFF"/><stop offset="1" stop-color="#C9E0ED"/></linearGradient>
+    <linearGradient id="rearCloud" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#BFD9EA"/><stop offset="1" stop-color="#8FB4CC"/></linearGradient>
+    <linearGradient id="drop" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#B6EAFF"/><stop offset=".48" stop-color="#5BBDF8"/><stop offset="1" stop-color="#168DE1"/></linearGradient>
+  </defs>
+  <path filter="url(#shadow)" fill="url(#cloud)" d="M55 181h130c26 0 45-17 45-40 0-21-17-38-39-38-10-25-34-43-63-43-32 0-58 21-65 50-22 2-39 18-39 38 0 19 14 33 31 33Z"/><g stroke-linecap="round"><path stroke="#1E81CA" stroke-width="6" opacity=".48" d="M86 174l-10 28M122 181l-11 32M158 172l-9 26"/><path stroke="#8EDBFF" stroke-width="3" d="M86 172l-10 28M122 179l-11 32M158 170l-9 26"/></g>
+</svg>

@@ -260,6 +260,8 @@ WEATHER_ICON_ALIASES = {
     "🌙": "moon",
     "partly_cloudy": "partly-cloudy",
     "partly-cloudy": "partly-cloudy",
+    "partly_cloudy_night": "partly-cloudy-night",
+    "partly-cloudy-night": "partly-cloudy-night",
     "⛅": "partly-cloudy",
     "cloud": "cloud",
     "cloudy": "cloudy",
@@ -267,15 +269,34 @@ WEATHER_ICON_ALIASES = {
     "fog": "fog",
     "mist": "fog",
     "🌫": "fog",
+    "drizzle": "drizzle",
     "showers": "showers",
-    "drizzle": "showers",
+    "showers_night": "showers-night",
+    "showers-night": "showers-night",
     "🌦": "showers",
     "rain": "rain",
     "☂": "rain",
     "🌧": "rain",
+    "freezing_rain": "freezing-rain",
+    "freezing-rain": "freezing-rain",
+    "sleet": "sleet",
+    "rain_snow": "sleet",
+    "rain-snow": "sleet",
     "snow": "snow",
+    "snow_showers": "snow-showers",
+    "snow-showers": "snow-showers",
+    "snow_showers_night": "snow-showers-night",
+    "snow-showers-night": "snow-showers-night",
+    "snow_grains": "snow-grains",
+    "snow-grains": "snow-grains",
     "❄": "snow",
+    "ice": "ice",
+    "hail": "hail",
     "thunder": "thunder",
+    "thunder_night": "thunder-night",
+    "thunder-night": "thunder-night",
+    "thunder_hail": "thunder-hail",
+    "thunder-hail": "thunder-hail",
     "storm": "thunder",
     "⛈": "thunder",
     "⚡": "thunder",
@@ -717,13 +738,26 @@ def build_tray_symbol_icon(symbol_text: str):
         "sun": _build_tray_sun_icon,
         "moon": _build_tray_crescent_icon,
         "partly-cloudy": _build_tray_partly_cloudy_icon,
+        "partly-cloudy-night": _build_tray_partly_cloudy_icon,
         "partly_cloudy": _build_tray_partly_cloudy_icon,
         "cloud": _build_tray_cloud_icon,
+        "cloudy": _build_tray_cloud_icon,
         "fog": _build_tray_fog_icon,
+        "drizzle": _build_tray_showers_icon,
         "showers": _build_tray_showers_icon,
+        "showers-night": _build_tray_showers_icon,
         "rain": _build_tray_rain_icon,
+        "freezing-rain": _build_tray_rain_icon,
+        "sleet": _build_tray_showers_icon,
         "snow": _build_tray_snow_icon,
+        "snow-showers": _build_tray_snow_icon,
+        "snow-showers-night": _build_tray_snow_icon,
+        "snow-grains": _build_tray_snow_icon,
+        "ice": _build_tray_snow_icon,
+        "hail": _build_tray_snow_icon,
         "thunder": _build_tray_thunder_icon,
+        "thunder-night": _build_tray_thunder_icon,
+        "thunder-hail": _build_tray_thunder_icon,
         "unknown": _build_tray_unknown_icon,
     }
     builder = builders.get(symbol)
@@ -736,14 +770,26 @@ def build_tray_symbol_icon(symbol_text: str):
         "sun": "☀",
         "moon": "🌙",
         "partly-cloudy": "⛅",
+        "partly-cloudy-night": "☁",
         "partly_cloudy": "⛅",
         "cloud": "☁",
         "cloudy": "☁",
         "fog": "☁",
+        "drizzle": "☂",
         "showers": "☂",
+        "showers-night": "☂",
         "rain": "☂",
+        "freezing-rain": "☂",
+        "sleet": "☂",
         "snow": "❄",
+        "snow-showers": "❄",
+        "snow-showers-night": "❄",
+        "snow-grains": "❄",
+        "ice": "❄",
+        "hail": "❄",
         "thunder": "⚡",
+        "thunder-night": "⚡",
+        "thunder-hail": "⚡",
         "unknown": "•",
     }.get(symbol, "☁")
 
@@ -1060,19 +1106,51 @@ def resolve_weather_style(code: int | None, is_day: bool = True) -> WeatherStyle
             accent=ACCENT_GOLD,
         )
     if code in {1, 2}:
-        return WeatherStyle(icon="⛅", icon_key="partly-cloudy", label="Puolipilvistä", accent="#E9C37A")
+        return WeatherStyle(
+            icon="⛅",
+            icon_key="partly-cloudy" if is_day else "partly-cloudy-night",
+            label="Puolipilvistä",
+            accent="#E9C37A",
+        )
     if code == 3:
         return WeatherStyle(icon="☁", icon_key="cloudy", label="Pilvistä", accent="#D6DEEA")
     if code in {45, 48}:
         return WeatherStyle(icon="🌫", icon_key="fog", label="Sumua", accent="#BCC8D7")
-    if code in {51, 53, 55, 56, 57}:
-        return WeatherStyle(icon="🌦", icon_key="showers", label="Tihkua", accent="#8CC7FF")
-    if code in {61, 63, 65, 66, 67, 80, 81, 82}:
+    if code in {51, 53, 55}:
+        return WeatherStyle(icon="🌦", icon_key="drizzle", label="Tihkua", accent="#8CC7FF")
+    if code in {56, 57}:
+        return WeatherStyle(icon="🌧", icon_key="freezing-rain", label="Jäätävää tihkua", accent="#9EDBFF")
+    if code in {61, 63, 65}:
         return WeatherStyle(icon="🌧", icon_key="rain", label="Sadetta", accent=ACCENT_BLUE)
-    if code in {71, 73, 75, 77, 85, 86}:
+    if code in {66, 67}:
+        return WeatherStyle(icon="🌧", icon_key="freezing-rain", label="Jäätävää sadetta", accent="#9EDBFF")
+    if code in {71, 73, 75}:
         return WeatherStyle(icon="❄", icon_key="snow", label="Lumisadetta", accent="#BEE9FF")
-    if code in {95, 96, 99}:
-        return WeatherStyle(icon="⛈", icon_key="thunder", label="Ukkosta", accent=ACCENT_LAVENDER)
+    if code == 77:
+        return WeatherStyle(icon="❄", icon_key="snow-grains", label="Lumijyväsiä", accent="#BEE9FF")
+    if code in {80, 81, 82}:
+        return WeatherStyle(
+            icon="🌦",
+            icon_key="showers" if is_day else "showers-night",
+            label="Sadekuuroja",
+            accent=ACCENT_BLUE,
+        )
+    if code in {85, 86}:
+        return WeatherStyle(
+            icon="❄",
+            icon_key="snow-showers" if is_day else "snow-showers-night",
+            label="Lumikuuroja",
+            accent="#BEE9FF",
+        )
+    if code == 95:
+        return WeatherStyle(
+            icon="⛈",
+            icon_key="thunder" if is_day else "thunder-night",
+            label="Ukkosta",
+            accent=ACCENT_LAVENDER,
+        )
+    if code in {96, 99}:
+        return WeatherStyle(icon="⛈", icon_key="thunder-hail", label="Ukkosta ja rakeita", accent=ACCENT_LAVENDER)
     return WeatherStyle(icon="•", icon_key="unknown", label="Tuntematon", accent="#D5DAE3")
 
 
