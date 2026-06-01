@@ -6,5 +6,21 @@
     <linearGradient id="cloud" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#F8FDFF"/><stop offset="1" stop-color="#C9E0ED"/></linearGradient>
     <linearGradient id="drop" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#9DDDFF"/><stop offset="1" stop-color="#55B3F2"/></linearGradient>
   </defs>
-  <path filter="url(#shadow)" fill="url(#cloud)" d="M55 181h130c26 0 45-17 45-40 0-21-17-38-39-38-10-25-34-43-63-43-32 0-58 21-65 50-22 2-39 18-39 38 0 19 14 33 31 33Z"/><g stroke="#78C8FF" stroke-width="8" stroke-linecap="round"><path d="M103 156v54M76 183h54M84 164l38 38M122 164l-38 38M158 139v46M135 162h46M142 146l32 32M174 146l-32 32"/></g>
+  <path filter="url(#shadow)" fill="url(#cloud)" d="M55 181h130c26 0 45-17 45-40 0-21-17-38-39-38-10-25-34-43-63-43-32 0-58 21-65 50-22 2-39 18-39 38 0 19 14 33 31 33Z"/>
+  <g filter="url(#shadow)" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke="#1B74B7" stroke-width="11" opacity=".72">
+      <path d="M102 157v56M74 185h56M82 165l40 40M122 165l-40 40M91 172l-10-10M113 172l10-10M91 198l-10 10M113 198l10 10"/>
+      <path d="M164 139v46M141 162h46M148 146l32 32M180 146l-32 32M156 151l-8-8M172 151l8-8M156 173l-8 8M172 173l8 8"/>
+    </g>
+    <g stroke="#78C8FF" stroke-width="7">
+      <path d="M102 157v56M74 185h56M82 165l40 40M122 165l-40 40M91 172l-10-10M113 172l10-10M91 198l-10 10M113 198l10 10"/>
+      <path d="M164 139v46M141 162h46M148 146l32 32M180 146l-32 32M156 151l-8-8M172 151l8-8M156 173l-8 8M172 173l8 8"/>
+    </g>
+    <g stroke="#F2FCFF" stroke-width="3" opacity=".72">
+      <path d="M100 159v47M78 183h48M86 168l33 33M119 168l-33 33"/>
+      <path d="M162 142v38M145 160h38M151 149l26 26M177 149l-26 26"/>
+    </g>
+    <circle cx="102" cy="185" r="8" fill="#BEEBFF"/>
+    <circle cx="164" cy="162" r="7" fill="#BEEBFF"/>
+  </g>
 </svg>
