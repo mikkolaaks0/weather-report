@@ -2177,7 +2177,7 @@ class WeatherWidget(tk.Tk):
                 0,
                 text="--° / --°",
                 anchor="n",
-                font=(TEXT_FONT, 11),
+                font=(TEXT_FONT, 10),
                 fill="#F3F7FF",
             )
             self.forecast_cards.append({"day": day_id, "icon": icon_id, "temp": temp_id})
