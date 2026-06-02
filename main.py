@@ -2383,8 +2383,9 @@ class WeatherWidget(tk.Tk):
         self.popup_bg_canvas.coords(self.today_hilo_label, right_text, right_stack_top + 38)
         sun_row_y = right_stack_top + 67
         icon_time_gap = 4
-        sun_event_icon_y_offset = 3
+        sun_event_icon_y_offset = 6
         sun_event_icon_left_nudge = 3
+        sunrise_icon_extra_left_nudge = 2
         group_gap = 16
         self.popup_bg_canvas.coords(self.today_sunset_time_label, right_text, sun_row_y)
         self.popup.update_idletasks()
@@ -2407,7 +2408,7 @@ class WeatherWidget(tk.Tk):
 
         self.popup_bg_canvas.coords(
             self.today_sun_icon_label,
-            sunrise_left - icon_time_gap - sun_event_icon_left_nudge,
+            sunrise_left - icon_time_gap - sun_event_icon_left_nudge - sunrise_icon_extra_left_nudge,
             sun_row_y + sun_event_icon_y_offset,
         )
         self._layout_today_stats(right_text, right_stack_top + 91)
