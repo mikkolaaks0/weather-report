@@ -916,13 +916,16 @@ def build_humidity_fog_icon(width: int = 16, height: int = 14):
 
     color = (140, 199, 255, 255)
     segments = [
-        (8, 2, w - 2, 7),
-        (2, 11, w - 22, 16),
-        (w - 18, 11, w - 2, 16),
-        (8, 20, w - 2, 25),
-        (2, 29, w - 28, 34),
-        (w - 24, 29, w - 2, 34),
-        (8, 38, w - 2, 43),
+        (14, 4, 30, 9),
+        (36, 4, w - 3, 9),
+        (3, 16, 26, 21),
+        (32, 16, 43, 21),
+        (48, 16, w - 2, 21),
+        (14, 28, 31, 33),
+        (37, 28, w - 4, 33),
+        (3, 40, 22, 45),
+        (27, 40, 40, 45),
+        (46, 40, w - 2, 45),
     ]
     radius = 4
     for x0, y0, x1, y1 in segments:
@@ -1012,34 +1015,34 @@ def build_wind_swirl_icon(width: int = 18, height: int = 14):
     def draw_trail(x0: int, x1: int, y: int) -> None:
         draw.rounded_rectangle((x0, y - cap_radius, x1, y + cap_radius), radius=cap_radius, fill=color)
 
-    # Cleaner swirl: fewer overlaps, more breathing room between trails.
+    # Three open, curled trails inspired by classic wind glyphs.
     top_y = int(h * 0.27)
-    mid_y = int(h * 0.61)
-    low_y = int(h * 0.86)
+    mid_y = int(h * 0.55)
+    low_y = int(h * 0.81)
 
-    draw_trail(int(w * 0.10), int(w * 0.56), top_y)
+    draw_trail(int(w * 0.09), int(w * 0.58), top_y)
     draw.arc(
-        (int(w * 0.45), int(h * 0.04), int(w * 0.88), int(h * 0.50)),
-        start=198,
-        end=26,
+        (int(w * 0.45), int(h * -0.04), int(w * 0.86), int(h * 0.46)),
+        start=188,
+        end=34,
         fill=color,
         width=stroke,
     )
 
-    draw_trail(int(w * 0.03), int(w * 0.77), mid_y)
+    draw_trail(int(w * 0.03), int(w * 0.78), mid_y)
     draw.arc(
-        (int(w * 0.63), int(h * 0.36), int(w * 1.02), int(h * 0.88)),
-        start=198,
-        end=24,
+        (int(w * 0.66), int(h * 0.30), int(w * 1.06), int(h * 0.86)),
+        start=188,
+        end=35,
         fill=color,
         width=stroke,
     )
 
-    draw_trail(int(w * 0.12), int(w * 0.39), low_y)
+    draw_trail(int(w * 0.13), int(w * 0.50), low_y)
     draw.arc(
-        (int(w * 0.23), int(h * 0.62), int(w * 0.63), int(h * 1.09)),
-        start=198,
-        end=24,
+        (int(w * 0.39), int(h * 0.58), int(w * 0.74), int(h * 1.08)),
+        start=188,
+        end=35,
         fill=color,
         width=stroke,
     )
@@ -2465,7 +2468,7 @@ class WeatherWidget(tk.Tk):
         self.popup_bg_canvas.coords(self.today_rain_mm_value_label, cursor, top_y)
         rain_mm_bbox = self.popup_bg_canvas.bbox(self.today_rain_mm_value_label)
         rain_mm_left = rain_mm_bbox[0] if rain_mm_bbox else (cursor - 42)
-        self.popup_bg_canvas.coords(self.today_rain_mm_icon_label, rain_mm_left - icon_value_gap, top_y)
+        self.popup_bg_canvas.coords(self.today_rain_mm_icon_label, rain_mm_left - icon_value_gap, top_y + 2)
 
         # Second row: wind.
         wind_y = top_y + line_height + 2
