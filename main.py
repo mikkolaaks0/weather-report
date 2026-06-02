@@ -101,7 +101,10 @@ POPUP_CONTENT_PAD = 10
 POPUP_CORNER_RADIUS = 44
 POPUP_BG_OPACITY = 0.85
 POPUP_CONTROL_HEIGHT = 26
-FORECAST_ICON_SIZE = 46
+HERO_ICON_WIDTH = 92
+HERO_ICON_HEIGHT = 90
+FORECAST_ICON_WIDTH = 46
+FORECAST_ICON_HEIGHT = 43
 SUN_EVENT_ICON_SIZE = 15
 DEFAULT_POPUP_THEME = "petrol"
 POPUP_THEMES = {
@@ -2277,13 +2280,20 @@ class WeatherWidget(tk.Tk):
         self.search_button = self._create_icon_button(self.popup_bg_canvas, "Hae", self._search_from_popup, width=4)
         self.refresh_button = self._create_icon_button(self.popup_bg_canvas, "⟳", self.refresh_weather)
         self.close_button = self._create_icon_button(self.popup_bg_canvas, "✕", self._hide_popup)
-        self._configure_canvas_weather_icon(self.hero_icon_label, "cloud", 92, 92, "☁", "#F5F8FF")
+        self._configure_canvas_weather_icon(
+            self.hero_icon_label,
+            "cloud",
+            HERO_ICON_WIDTH,
+            HERO_ICON_HEIGHT,
+            "☁",
+            "#F5F8FF",
+        )
         for card in self.forecast_cards:
             self._configure_canvas_weather_icon(
                 card["icon"],
                 "unknown",
-                FORECAST_ICON_SIZE,
-                FORECAST_ICON_SIZE,
+                FORECAST_ICON_WIDTH,
+                FORECAST_ICON_HEIGHT,
                 "•",
                 TEXT_MUTED,
             )
@@ -2364,7 +2374,7 @@ class WeatherWidget(tk.Tk):
         self.popup_bg_canvas.coords(self.theme_dot_item, right - label_width - 8, control_y + 2)
 
         self.popup_bg_canvas.coords(self.hero_city_label, pad + left_nudge, 57 + hero_shift)
-        self.popup_bg_canvas.coords(self.hero_icon_label, pad + 8 + left_nudge, 152 + hero_shift)
+        self.popup_bg_canvas.coords(self.hero_icon_label, pad + 8 + left_nudge, 157 + hero_shift)
         self.popup_bg_canvas.coords(self.hero_temp_label, pad + 116 + left_nudge, 99 + hero_shift)
 
         right_text = width - pad - 14
@@ -2755,8 +2765,8 @@ class WeatherWidget(tk.Tk):
         self._configure_canvas_weather_icon(
             self.hero_icon_label,
             style.icon_key,
-            92,
-            92,
+            HERO_ICON_WIDTH,
+            HERO_ICON_HEIGHT,
             style.icon,
             style.accent,
         )
@@ -2825,8 +2835,8 @@ class WeatherWidget(tk.Tk):
                 self._configure_canvas_weather_icon(
                     card["icon"],
                     "unknown",
-                    FORECAST_ICON_SIZE,
-                    FORECAST_ICON_SIZE,
+                    FORECAST_ICON_WIDTH,
+                    FORECAST_ICON_HEIGHT,
                     "•",
                     TEXT_MUTED,
                 )
@@ -2847,8 +2857,8 @@ class WeatherWidget(tk.Tk):
             self._configure_canvas_weather_icon(
                 card["icon"],
                 forecast_style.icon_key,
-                FORECAST_ICON_SIZE,
-                FORECAST_ICON_SIZE,
+                FORECAST_ICON_WIDTH,
+                FORECAST_ICON_HEIGHT,
                 forecast_style.icon,
                 forecast_style.accent,
             )
