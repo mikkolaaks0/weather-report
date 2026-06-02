@@ -99,7 +99,9 @@ POPUP_INPUT_BG = "#173B49"
 POPUP_CONTENT_PAD = 10
 POPUP_CORNER_RADIUS = 44
 POPUP_BG_OPACITY = 0.85
+POPUP_CONTROL_HEIGHT = 26
 FORECAST_ICON_SIZE = 46
+SUN_EVENT_ICON_SIZE = 15
 DEFAULT_POPUP_THEME = "petrol"
 POPUP_THEMES = {
     "petrol": {
@@ -1540,6 +1542,8 @@ class WeatherWidget(tk.Tk):
         self.rain_prob_drop_icon_photo = build_rain_probability_drop_icon(width=12, height=14)
         self.humidity_fog_icon_photo = build_humidity_fog_icon()
         self.wind_swirl_icon_photo = build_wind_swirl_icon()
+        self.sunrise_sun_icon_photo = self._weather_icon_photo("sun", SUN_EVENT_ICON_SIZE, SUN_EVENT_ICON_SIZE)
+        self.sunset_moon_icon_photo = self._weather_icon_photo("moon", SUN_EVENT_ICON_SIZE, SUN_EVENT_ICON_SIZE)
         self.popup_bg_size: tuple[int, int, str] | None = None
 
         self.title(APP_NAME)
@@ -2104,14 +2108,22 @@ class WeatherWidget(tk.Tk):
             font=(TEXT_FONT, 16, "bold"),
             fill="#E3ECFF",
         )
-        self.today_sun_icon_label = self.popup_bg_canvas.create_text(
-            0,
-            0,
-            text="☀️",
-            anchor="ne",
-            font=(EMOJI_FONT, 11),
-            fill=ACCENT_GOLD,
-        )
+        if self.sunrise_sun_icon_photo is not None:
+            self.today_sun_icon_label = self.popup_bg_canvas.create_image(
+                0,
+                0,
+                image=self.sunrise_sun_icon_photo,
+                anchor="ne",
+            )
+        else:
+            self.today_sun_icon_label = self.popup_bg_canvas.create_text(
+                0,
+                0,
+                text="☀️",
+                anchor="ne",
+                font=(EMOJI_FONT, 11),
+                fill=ACCENT_GOLD,
+            )
         self.today_sunrise_time_label = self.popup_bg_canvas.create_text(
             0,
             0,
@@ -2120,14 +2132,22 @@ class WeatherWidget(tk.Tk):
             font=(TEXT_FONT, 11),
             fill="#CCD9F7",
         )
-        self.today_moon_icon_label = self.popup_bg_canvas.create_text(
-            0,
-            0,
-            text="🌙",
-            anchor="ne",
-            font=(EMOJI_FONT, 11),
-            fill=ACCENT_GOLD,
-        )
+        if self.sunset_moon_icon_photo is not None:
+            self.today_moon_icon_label = self.popup_bg_canvas.create_image(
+                0,
+                0,
+                image=self.sunset_moon_icon_photo,
+                anchor="ne",
+            )
+        else:
+            self.today_moon_icon_label = self.popup_bg_canvas.create_text(
+                0,
+                0,
+                text="🌙",
+                anchor="ne",
+                font=(EMOJI_FONT, 11),
+                fill=ACCENT_GOLD,
+            )
         self.today_sunset_time_label = self.popup_bg_canvas.create_text(
             0,
             0,
@@ -2203,7 +2223,7 @@ class WeatherWidget(tk.Tk):
             justify="left",
             width=16,
         )
-        self.location_entry.pack(side="left", ipady=2)
+        self.location_entry.pack(side="left", fill="both", expand=True, ipady=2)
         self.location_entry.bind("<Return>", lambda _: self._search_from_popup())
 
         self.search_button = self._create_icon_button(self.popup_bg_canvas, "Hae", self._search_from_popup, width=4)
@@ -2226,10 +2246,29 @@ class WeatherWidget(tk.Tk):
             0,
             window=self.location_entry_shell,
             anchor="ne",
+            height=POPUP_CONTROL_HEIGHT,
         )
-        self.search_button_window = self.popup_bg_canvas.create_window(0, 0, window=self.search_button, anchor="ne")
-        self.refresh_button_window = self.popup_bg_canvas.create_window(0, 0, window=self.refresh_button, anchor="ne")
-        self.close_button_window = self.popup_bg_canvas.create_window(0, 0, window=self.close_button, anchor="ne")
+        self.search_button_window = self.popup_bg_canvas.create_window(
+            0,
+            0,
+            window=self.search_button,
+            anchor="ne",
+            height=POPUP_CONTROL_HEIGHT,
+        )
+        self.refresh_button_window = self.popup_bg_canvas.create_window(
+            0,
+            0,
+            window=self.refresh_button,
+            anchor="ne",
+            height=POPUP_CONTROL_HEIGHT,
+        )
+        self.close_button_window = self.popup_bg_canvas.create_window(
+            0,
+            0,
+            window=self.close_button,
+            anchor="ne",
+            height=POPUP_CONTROL_HEIGHT,
+        )
         self.popup_bg_canvas.bind("<Configure>", self._on_popup_canvas_configure)
         self.popup.update_idletasks()
 
@@ -2277,15 +2316,13 @@ class WeatherWidget(tk.Tk):
         self.popup_bg_canvas.coords(self.theme_dot_item, right - label_width - 8, control_y + 2)
 
         self.popup_bg_canvas.coords(self.hero_city_label, pad + left_nudge, 57 + hero_shift)
-        self.popup_bg_canvas.coords(self.hero_icon_label, pad + 8 + left_nudge, 137 + hero_shift)
-        self.popup_bg_canvas.coords(self.hero_temp_label, pad + 92 + left_nudge, 99 + hero_shift)
+        self.popup_bg_canvas.coords(self.hero_icon_label, pad + 8 + left_nudge, 152 + hero_shift)
+        self.popup_bg_canvas.coords(self.hero_temp_label, pad + 116 + left_nudge, 99 + hero_shift)
 
         right_text = width - pad - 14
-        stats_top = 61 + right_shift
-        self._layout_today_stats(right_text, stats_top)
-        self.popup_bg_canvas.coords(self.today_condition_label, right_text, 106 + right_shift)
-        self.popup_bg_canvas.coords(self.today_hilo_label, right_text, 144 + right_shift)
-        sun_row_y = 173 + right_shift
+        self.popup_bg_canvas.coords(self.today_condition_label, right_text, 74 + right_shift)
+        self.popup_bg_canvas.coords(self.today_hilo_label, right_text, 112 + right_shift)
+        sun_row_y = 141 + right_shift
         icon_time_gap = 4
         group_gap = 16
         self.popup_bg_canvas.coords(self.today_sunset_time_label, right_text, sun_row_y)
@@ -2304,6 +2341,7 @@ class WeatherWidget(tk.Tk):
         sunrise_left = sunrise_bbox[0] if sunrise_bbox else (moon_left - 42)
 
         self.popup_bg_canvas.coords(self.today_sun_icon_label, sunrise_left - icon_time_gap, sun_row_y)
+        self._layout_today_stats(right_text, 165 + right_shift)
 
         forecast_top = (height - 116) - forecast_shift
         forecast_side_inset = 12
@@ -2417,7 +2455,8 @@ class WeatherWidget(tk.Tk):
             activeforeground="#FFFFFF",
             width=width,
             padx=0,
-            pady=2,
+            pady=0,
+            highlightthickness=0,
         )
 
     def _position_widget(self) -> None:
@@ -2712,9 +2751,15 @@ class WeatherWidget(tk.Tk):
 
         self.popup_bg_canvas.itemconfigure(self.today_condition_label, text=condition_label)
         self.popup_bg_canvas.itemconfigure(self.today_hilo_label, text=high_low_text)
-        self.popup_bg_canvas.itemconfigure(self.today_sun_icon_label, text="☀️", fill=ACCENT_GOLD)
+        if self.sunrise_sun_icon_photo is None:
+            self.popup_bg_canvas.itemconfigure(self.today_sun_icon_label, text="☀️", fill=ACCENT_GOLD)
+        else:
+            self.popup_bg_canvas.itemconfigure(self.today_sun_icon_label, image=self.sunrise_sun_icon_photo)
         self.popup_bg_canvas.itemconfigure(self.today_sunrise_time_label, text=sunrise)
-        self.popup_bg_canvas.itemconfigure(self.today_moon_icon_label, text="🌙", fill=ACCENT_GOLD)
+        if self.sunset_moon_icon_photo is None:
+            self.popup_bg_canvas.itemconfigure(self.today_moon_icon_label, text="🌙", fill=ACCENT_GOLD)
+        else:
+            self.popup_bg_canvas.itemconfigure(self.today_moon_icon_label, image=self.sunset_moon_icon_photo)
         self.popup_bg_canvas.itemconfigure(self.today_sunset_time_label, text=sunset)
 
     def _apply_forecast_cards(self, daily: dict) -> None:
