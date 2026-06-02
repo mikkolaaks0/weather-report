@@ -1005,50 +1005,61 @@ def build_wind_swirl_icon(width: int = 18, height: int = 14):
     scale = 4
     w = max(1, width * scale)
     h = max(1, height * scale)
-    image = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-
     color = (67, 170, 246, 255)
     stroke = max(4, int(h * 0.14))
-    cap_radius = max(2, stroke // 2)
+    canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    oversample = 3
+    draw_image = Image.new("RGBA", (w * oversample, h * oversample), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(draw_image)
 
-    def draw_trail(x0: int, x1: int, y: int) -> None:
-        draw.rounded_rectangle((x0, y - cap_radius, x1, y + cap_radius), radius=cap_radius, fill=color)
+    def cubic(p0, p1, p2, p3, steps: int = 16) -> list[tuple[int, int]]:
+        points = []
+        for step in range(steps + 1):
+            t = step / steps
+            inv = 1 - t
+            x = (
+                inv**3 * p0[0]
+                + 3 * inv**2 * t * p1[0]
+                + 3 * inv * t**2 * p2[0]
+                + t**3 * p3[0]
+            )
+            y = (
+                inv**3 * p0[1]
+                + 3 * inv**2 * t * p1[1]
+                + 3 * inv * t**2 * p2[1]
+                + t**3 * p3[1]
+            )
+            points.append((int(x * oversample), int(y * oversample)))
+        return points
 
-    # Three open, curled trails inspired by classic wind glyphs.
-    top_y = int(h * 0.27)
-    mid_y = int(h * 0.55)
-    low_y = int(h * 0.81)
+    def draw_path(points: list[tuple[float, float]]) -> None:
+        scaled_points = [(int(x * w * oversample), int(y * h * oversample)) for x, y in points]
+        draw.line(scaled_points, fill=color, width=stroke * oversample, joint="curve")
+        radius = (stroke * oversample) // 2
+        for x, y in (scaled_points[0], scaled_points[-1]):
+            draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
 
-    draw_trail(int(w * 0.09), int(w * 0.58), top_y)
-    draw.arc(
-        (int(w * 0.45), int(h * -0.04), int(w * 0.86), int(h * 0.46)),
-        start=188,
-        end=34,
-        fill=color,
-        width=stroke,
-    )
+    paths = [
+        cubic((0.13 * w, 0.30 * h), (0.32 * w, 0.31 * h), (0.50 * w, 0.31 * h), (0.64 * w, 0.29 * h), 10)
+        + cubic((0.64 * w, 0.29 * h), (0.78 * w, 0.27 * h), (0.77 * w, 0.09 * h), (0.64 * w, 0.16 * h), 12)[1:]
+        + cubic((0.64 * w, 0.16 * h), (0.57 * w, 0.20 * h), (0.62 * w, 0.29 * h), (0.65 * w, 0.23 * h), 8)[1:],
+        cubic((0.06 * w, 0.50 * h), (0.30 * w, 0.53 * h), (0.52 * w, 0.52 * h), (0.74 * w, 0.45 * h), 14)
+        + cubic((0.74 * w, 0.45 * h), (0.95 * w, 0.38 * h), (0.94 * w, 0.72 * h), (0.80 * w, 0.64 * h), 16)[1:]
+        + cubic((0.80 * w, 0.64 * h), (0.72 * w, 0.61 * h), (0.75 * w, 0.52 * h), (0.83 * w, 0.55 * h), 8)[1:],
+        cubic((0.20 * w, 0.72 * h), (0.40 * w, 0.74 * h), (0.55 * w, 0.72 * h), (0.66 * w, 0.67 * h), 12)
+        + cubic((0.66 * w, 0.67 * h), (0.87 * w, 0.59 * h), (0.90 * w, 0.91 * h), (0.70 * w, 0.80 * h), 16)[1:]
+        + cubic((0.70 * w, 0.80 * h), (0.62 * w, 0.75 * h), (0.66 * w, 0.68 * h), (0.72 * w, 0.73 * h), 8)[1:],
+    ]
 
-    draw_trail(int(w * 0.03), int(w * 0.78), mid_y)
-    draw.arc(
-        (int(w * 0.66), int(h * 0.30), int(w * 1.06), int(h * 0.86)),
-        start=188,
-        end=35,
-        fill=color,
-        width=stroke,
-    )
-
-    draw_trail(int(w * 0.13), int(w * 0.50), low_y)
-    draw.arc(
-        (int(w * 0.39), int(h * 0.58), int(w * 0.74), int(h * 1.08)),
-        start=188,
-        end=35,
-        fill=color,
-        width=stroke,
-    )
+    for path in paths:
+        draw_path([(x / w / oversample, y / h / oversample) for x, y in path])
 
     resampling = getattr(Image, "Resampling", Image)
-    resized = image.resize((width, height), resampling.LANCZOS)
+    image = draw_image.resize((w, h), resampling.LANCZOS)
+    canvas.alpha_composite(image)
+
+    resampling = getattr(Image, "Resampling", Image)
+    resized = canvas.resize((width, height), resampling.LANCZOS)
     return ImageTk.PhotoImage(resized)
 
 

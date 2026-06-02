@@ -4,8 +4,8 @@
     <linearGradient id="blue" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#B9ECFF"/><stop offset=".52" stop-color="#58BDF7"/><stop offset="1" stop-color="#168DE1"/></linearGradient>
   </defs>
   <g filter="url(#shadow)" fill="none" stroke="#78CAFF" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M34 82c46 2 96 1 132-4 25-4 35-26 20-42-14-15-42-5-38 20"/>
-    <path d="M22 128c54 4 118 0 172-13 28-7 52 10 50 35-2 23-33 34-49 13-8-11-4-24 8-28"/>
-    <path d="M58 174c38 2 79 0 107-7 23-6 42 8 39 29-3 20-30 28-43 11-7-9-4-20 7-25"/>
+    <path d="M34 78 C78 79 124 79 164 75 C184 72 191 54 181 42 C169 27 145 36 149 55"/>
+    <path d="M22 124 C74 128 130 126 190 114 C221 108 244 130 234 153 C224 175 192 168 191 145"/>
+    <path d="M58 174 C98 176 136 174 164 167 C191 160 213 181 200 202 C187 221 160 211 161 190"/>
   </g>
 </svg>
