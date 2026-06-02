@@ -2378,9 +2378,10 @@ class WeatherWidget(tk.Tk):
         self.popup_bg_canvas.coords(self.hero_temp_label, pad + 116 + left_nudge, 99 + hero_shift)
 
         right_text = width - pad - 14
-        self.popup_bg_canvas.coords(self.today_condition_label, right_text, 74 + right_shift)
-        self.popup_bg_canvas.coords(self.today_hilo_label, right_text, 112 + right_shift)
-        sun_row_y = 141 + right_shift
+        right_stack_top = 58 + right_shift
+        self.popup_bg_canvas.coords(self.today_condition_label, right_text, right_stack_top)
+        self.popup_bg_canvas.coords(self.today_hilo_label, right_text, right_stack_top + 38)
+        sun_row_y = right_stack_top + 67
         icon_time_gap = 4
         group_gap = 16
         self.popup_bg_canvas.coords(self.today_sunset_time_label, right_text, sun_row_y)
@@ -2399,7 +2400,7 @@ class WeatherWidget(tk.Tk):
         sunrise_left = sunrise_bbox[0] if sunrise_bbox else (moon_left - 42)
 
         self.popup_bg_canvas.coords(self.today_sun_icon_label, sunrise_left - icon_time_gap, sun_row_y)
-        self._layout_today_stats(right_text, 165 + right_shift)
+        self._layout_today_stats(right_text, right_stack_top + 91)
 
         forecast_top = (height - 116) - forecast_shift
         forecast_side_inset = 12
