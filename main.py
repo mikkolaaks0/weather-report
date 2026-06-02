@@ -2379,7 +2379,7 @@ class WeatherWidget(tk.Tk):
 
         right_text = width - pad - 14
         right_stack_top = 58 + right_shift
-        self.popup_bg_canvas.coords(self.today_condition_label, right_text, right_stack_top)
+        self.popup_bg_canvas.coords(self.today_condition_label, right_text - 4, right_stack_top)
         self.popup_bg_canvas.coords(self.today_hilo_label, right_text, right_stack_top + 38)
         sun_row_y = right_stack_top + 67
         icon_time_gap = 4
