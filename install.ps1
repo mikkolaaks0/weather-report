@@ -30,33 +30,53 @@ function Invoke-Download {
 function Normalize-PathForSafety {
     param([string]$Path)
 
-    if (-not $Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) {
         return $null
     }
 
-    return [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if ($fullPath.Length -gt 3) {
+        return $fullPath.TrimEnd('\')
+    }
+
+    return $fullPath
 }
 
 function Assert-SafeInstallDirectory {
     param([string]$Path)
 
-    $resolvedParent = Resolve-Path -LiteralPath (Split-Path -Parent $Path) -ErrorAction SilentlyContinue
-    if (-not $resolvedParent) {
-        return
+    $fullPath = Normalize-PathForSafety $Path
+    if (-not $fullPath) {
+        throw 'Install directory is empty.'
     }
 
-    $fullPath = Normalize-PathForSafety $Path
+    $comparison = [System.StringComparison]::OrdinalIgnoreCase
+    $rootPath = Normalize-PathForSafety ([System.IO.Path]::GetPathRoot($fullPath))
+    if ([string]::Equals($fullPath, $rootPath, $comparison)) {
+        throw "Refusing to install directly into drive root: $fullPath"
+    }
+
+    $leafName = Split-Path -Leaf $fullPath
+    if ($leafName -notin @('WeatherReport', 'Weather Report')) {
+        throw "Install directory must be an app-specific WeatherReport folder. Got: $fullPath"
+    }
+
     $programsPath = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs' } else { $null }
     $blockedPaths = @(
-        (Normalize-PathForSafety ([System.IO.Path]::GetPathRoot($fullPath))),
         (Normalize-PathForSafety $env:USERPROFILE),
         (Normalize-PathForSafety $env:LOCALAPPDATA),
         (Normalize-PathForSafety $env:APPDATA),
-        (Normalize-PathForSafety $programsPath)
+        (Normalize-PathForSafety $programsPath),
+        (Normalize-PathForSafety $env:ProgramFiles),
+        (Normalize-PathForSafety ${env:ProgramFiles(x86)}),
+        (Normalize-PathForSafety ([Environment]::GetFolderPath('DesktopDirectory'))),
+        (Normalize-PathForSafety ([Environment]::GetFolderPath('MyDocuments')))
     ) | Where-Object { $_ }
 
-    if ($blockedPaths -contains $fullPath) {
-        throw "Refusing to install directly into unsafe path: $fullPath"
+    foreach ($blockedPath in $blockedPaths) {
+        if ([string]::Equals($fullPath, $blockedPath, $comparison)) {
+            throw "Refusing to install directly into unsafe path: $fullPath"
+        }
     }
 }
 
@@ -147,8 +167,8 @@ Test-AssetChecksum -Release $release -AssetName $asset.name -AssetPath $zipPath
 
 Get-Process -Name 'WeatherReport' -ErrorAction SilentlyContinue | Stop-Process -Force
 
-if (Test-Path $InstallDir) {
-    Remove-Item -Path $InstallDir -Recurse -Force
+if (Test-Path -LiteralPath $InstallDir) {
+    Remove-Item -LiteralPath $InstallDir -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 

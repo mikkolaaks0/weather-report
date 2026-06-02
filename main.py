@@ -40,6 +40,7 @@ REFRESH_INTERVAL_MS = 30 * 60 * 1000
 FRESH_WEATHER_MAX_AGE_MINUTES = 15
 UPDATE_CHECK_DELAY_MS = 10 * 1000
 DEFAULT_CITY = "Helsinki"
+VALID_TEMPERATURE_UNITS = {"celsius", "fahrenheit"}
 FORECAST_DAYS = 7
 POPUP_FORECAST_DAYS = max(1, FORECAST_DAYS - 1)
 RAIN_PROBABILITY_LOOKAHEAD_HOURS = 6
@@ -1050,26 +1051,46 @@ def format_clock_fi(value: datetime) -> str:
     return f"{day_short} {value:%d.%m.%Y %H:%M:%S}"
 
 def load_settings() -> dict:
-    defaults = {
+    settings = {
         "city": DEFAULT_CITY,
         "temperature_unit": "celsius",
         "popup_theme": DEFAULT_POPUP_THEME,
     }
 
     if not SETTINGS_PATH.exists():
-        return defaults
+        return settings
 
     try:
         with SETTINGS_PATH.open("r", encoding="utf-8") as handle:
             saved = json.load(handle)
     except (OSError, json.JSONDecodeError):
-        return defaults
+        return settings
 
     if not isinstance(saved, dict):
-        return defaults
+        return settings
 
-    defaults.update(saved)
-    return defaults
+    settings.update(saved)
+
+    city = settings.get("city")
+    if isinstance(city, str) and city.strip():
+        settings["city"] = city.strip()
+    else:
+        settings["city"] = DEFAULT_CITY
+
+    temperature_unit = settings.get("temperature_unit")
+    if isinstance(temperature_unit, str):
+        temperature_unit = temperature_unit.strip().lower()
+    if temperature_unit not in VALID_TEMPERATURE_UNITS:
+        temperature_unit = "celsius"
+    settings["temperature_unit"] = temperature_unit
+
+    popup_theme = settings.get("popup_theme")
+    if isinstance(popup_theme, str) and popup_theme.strip():
+        settings["popup_theme"] = popup_theme.strip().lower()
+    else:
+        settings["popup_theme"] = DEFAULT_POPUP_THEME
+
+    return settings
 
 
 def save_settings(settings: dict) -> None:
@@ -1459,6 +1480,17 @@ def check_github_update_status() -> dict:
     if inside_worktree.lower() != "true":
         return {"state": "unsupported", "message": "Sovelluskansio ei ole Git-repositorio."}
 
+    current_branch = _git_output(["branch", "--show-current"])
+    if current_branch != UPDATE_BRANCH:
+        branch_label = current_branch or "detached HEAD"
+        return {
+            "state": "unsupported",
+            "message": (
+                "Automaattinen Git-päivitys on sallittu vain "
+                f"{UPDATE_BRANCH}-branchissa. Nykyinen branch: {branch_label}."
+            ),
+        }
+
     status = _git_output(["status", "--porcelain"])
     if status:
         return {"state": "dirty", "message": "Paikallisia muutoksia on auki, päivitystä ei tehdä automaattisesti."}
@@ -1481,6 +1513,14 @@ def check_github_update_status() -> dict:
 
 
 def apply_github_update() -> None:
+    current_branch = _git_output(["branch", "--show-current"])
+    if current_branch != UPDATE_BRANCH:
+        branch_label = current_branch or "detached HEAD"
+        raise RuntimeError(
+            "Automaattinen Git-päivitys voidaan tehdä vain "
+            f"{UPDATE_BRANCH}-branchissa. Nykyinen branch: {branch_label}."
+        )
+
     result = _run_git_command(["pull", "--ff-only", UPDATE_REMOTE, UPDATE_BRANCH], timeout=120)
     if result.returncode != 0:
         details = (result.stderr or result.stdout or "").strip()
@@ -1738,7 +1778,9 @@ class WeatherWidget(tk.Tk):
                 status = check_github_update_status()
             except Exception as error:  # noqa: BLE001
                 status = {"state": "error", "message": str(error)}
-            self.after(0, lambda: self._handle_update_check_result(status, manual))
+            self._call_on_ui_thread(
+                lambda status=status, manual=manual: self._handle_update_check_result(status, manual)
+            )
 
         self._start_background_worker(worker)
 
@@ -1770,7 +1812,7 @@ class WeatherWidget(tk.Tk):
                 apply_github_update()
             except Exception as error:  # noqa: BLE001
                 error_text = str(error)
-            self.after(0, lambda: self._finish_app_update(error_text))
+            self._call_on_ui_thread(lambda error_text=error_text: self._finish_app_update(error_text))
 
         self._start_background_worker(worker)
 
@@ -1815,6 +1857,12 @@ class WeatherWidget(tk.Tk):
 
     def _start_background_worker(self, target: Callable[[], None]) -> None:
         threading.Thread(target=target, daemon=True).start()
+
+    def _call_on_ui_thread(self, callback: Callable[[], None]) -> None:
+        try:
+            self.after(0, callback)
+        except (RuntimeError, tk.TclError):
+            pass
 
     def destroy(self) -> None:
         for job_name in ("clock_job", "refresh_job", "bootstrap_job", "update_job"):
@@ -2565,8 +2613,7 @@ class WeatherWidget(tk.Tk):
             messagebox.showinfo(APP_NAME, "Kirjoita paikkakunnan nimi.")
             return
 
-        self.city_var.set(city)
-        self.refresh_weather()
+        self.refresh_weather(city)
 
     def _open_open_meteo_terms(self) -> None:
         try:
@@ -2619,11 +2666,11 @@ class WeatherWidget(tk.Tk):
     def _cycle_popup_theme(self, _event: tk.Event | None = None) -> None:
         self._set_popup_theme(self._next_popup_theme_id())
 
-    def refresh_weather(self) -> None:
+    def refresh_weather(self, city_override: str | None = None) -> None:
         if self.fetch_in_progress:
             return
 
-        city = self.city_var.get().strip()
+        city = (city_override if city_override is not None else self.city_var.get()).strip()
         if not city:
             messagebox.showinfo(APP_NAME, "Kirjoita paikkakunnan nimi.")
             return
@@ -2654,17 +2701,19 @@ class WeatherWidget(tk.Tk):
             if weather is None:
                 raise RuntimeError("Säädata puuttuu palveluvastauksesta.")
 
-            self.after(0, lambda: self._apply_weather(place, weather))
+            self._call_on_ui_thread(lambda place=place, weather=weather: self._apply_weather(place, weather))
         except ValueError as error:
-            self.after(0, lambda: self._show_error(str(error)))
+            message = str(error)
+            self._call_on_ui_thread(lambda message=message: self._show_error(message, notify_user=True))
         except (URLError, HTTPError, TimeoutError):
-            self.after(0, lambda: self._show_error("Verkkovirhe. Tarkista internet-yhteys."))
+            self._call_on_ui_thread(lambda: self._show_error("Verkkovirhe. Tarkista internet-yhteys."))
         except Exception as error:  # noqa: BLE001
-            self.after(0, lambda: self._show_error(f"Tuntematon virhe: {error}"))
+            message = f"Tuntematon virhe: {error}"
+            self._call_on_ui_thread(lambda message=message: self._show_error(message))
 
-    def _show_error(self, text: str) -> None:
+    def _show_error(self, text: str, notify_user: bool = False) -> None:
         self.fetch_in_progress = False
-        self.status_var.set("Päivitys epäonnistui, yritetään uudelleen 30 minuutin päästä.")
+        self.status_var.set(f"Päivitys epäonnistui: {text} Yritetään uudelleen 30 minuutin päästä.")
         # Keep the last successful weather symbol in tray after transient fetch errors.
         # Show the bullet only when we do not have any weather data yet.
         if self.latest_weather:
@@ -2675,7 +2724,7 @@ class WeatherWidget(tk.Tk):
             self._update_tray_symbol(style.icon_key, f"{city_text}: {current_temp} (päivitys epäonnistui)")
         else:
             self._update_tray_symbol("unknown", f"{APP_NAME}: päivitys epäonnistui")
-        if not self.latest_weather:
+        if notify_user or not self.latest_weather:
             messagebox.showerror(APP_NAME, text)
         self._schedule_refresh()
 
@@ -2810,6 +2859,7 @@ class WeatherWidget(tk.Tk):
         self.latest_place = place
         self.latest_weather = weather
         resolved_city = place.get("name", self.city_var.get())
+        self.city_var.set(resolved_city)
         if self.settings.get("city") != resolved_city:
             self.settings["city"] = resolved_city
             save_settings(self.settings)

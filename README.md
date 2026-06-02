@@ -48,7 +48,9 @@ irm https://raw.githubusercontent.com/mikkolaaks0/weather-report/main/install.ps
 ```
 
 Useful flags are `-Startup`, `-NoDesktopShortcut`, `-NoStartMenuShortcut`, and
-`-NoLaunch`.
+`-NoLaunch`. A custom `-InstallDir` must point to an app-specific
+`WeatherReport` folder; the installer refuses broad user, AppData, Programs, or
+drive-root paths before replacing an existing install.
 
 To uninstall the portable install:
 
@@ -140,9 +142,10 @@ User settings are stored under:
 
 ## Updates
 
-When running from a Git checkout, the app can check `origin/main` for updates.
-It only applies fast-forward updates, asks before updating, and restarts itself
-after a successful update.
+When running from a Git checkout on the `main` branch, the app can check
+`origin/main` for updates. It only applies fast-forward updates, asks before
+updating, and restarts itself after a successful update. Other branches skip the
+automatic update path to avoid pulling `main` into local development work.
 
 For public distribution, prefer GitHub Releases with a signed or checksummed
 installer/portable package.
