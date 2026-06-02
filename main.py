@@ -2379,17 +2379,23 @@ class WeatherWidget(tk.Tk):
 
         right_text = width - pad - 14
         right_stack_top = 58 + right_shift
-        self.popup_bg_canvas.coords(self.today_condition_label, right_text - 4, right_stack_top)
+        self.popup_bg_canvas.coords(self.today_condition_label, right_text - 4, right_stack_top + 2)
         self.popup_bg_canvas.coords(self.today_hilo_label, right_text, right_stack_top + 38)
         sun_row_y = right_stack_top + 67
         icon_time_gap = 4
+        sun_event_icon_y_offset = 3
+        sun_event_icon_left_nudge = 3
         group_gap = 16
         self.popup_bg_canvas.coords(self.today_sunset_time_label, right_text, sun_row_y)
         self.popup.update_idletasks()
         sunset_bbox = self.popup_bg_canvas.bbox(self.today_sunset_time_label)
         sunset_left = sunset_bbox[0] if sunset_bbox else (right_text - 36)
 
-        self.popup_bg_canvas.coords(self.today_moon_icon_label, sunset_left - icon_time_gap, sun_row_y)
+        self.popup_bg_canvas.coords(
+            self.today_moon_icon_label,
+            sunset_left - icon_time_gap - sun_event_icon_left_nudge,
+            sun_row_y + sun_event_icon_y_offset,
+        )
         self.popup.update_idletasks()
         moon_bbox = self.popup_bg_canvas.bbox(self.today_moon_icon_label)
         moon_left = moon_bbox[0] if moon_bbox else (sunset_left - 14)
@@ -2399,7 +2405,11 @@ class WeatherWidget(tk.Tk):
         sunrise_bbox = self.popup_bg_canvas.bbox(self.today_sunrise_time_label)
         sunrise_left = sunrise_bbox[0] if sunrise_bbox else (moon_left - 42)
 
-        self.popup_bg_canvas.coords(self.today_sun_icon_label, sunrise_left - icon_time_gap, sun_row_y)
+        self.popup_bg_canvas.coords(
+            self.today_sun_icon_label,
+            sunrise_left - icon_time_gap - sun_event_icon_left_nudge,
+            sun_row_y + sun_event_icon_y_offset,
+        )
         self._layout_today_stats(right_text, right_stack_top + 91)
 
         forecast_top = (height - 116) - forecast_shift
@@ -2410,7 +2420,7 @@ class WeatherWidget(tk.Tk):
         for index, card in enumerate(self.forecast_cards):
             center_x = int(forecast_left + (index + 0.5) * col_width)
             card["center_x"] = center_x
-            card["icon_y"] = forecast_top + 17
+            card["icon_y"] = forecast_top + 19
             self.popup_bg_canvas.coords(card["day"], center_x, forecast_top)
             self.popup_bg_canvas.coords(card["icon"], center_x, card["icon_y"])
             self.popup_bg_canvas.coords(card["temp"], center_x, forecast_top + 68)
