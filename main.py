@@ -2435,7 +2435,7 @@ class WeatherWidget(tk.Tk):
         for index, card in enumerate(self.forecast_cards):
             center_x = int(forecast_left + (index + 0.5) * col_width)
             card["center_x"] = center_x
-            card["icon_y"] = forecast_top + 19
+            card["icon_y"] = forecast_top + 22
             self.popup_bg_canvas.coords(card["day"], center_x, forecast_top)
             self.popup_bg_canvas.coords(card["icon"], center_x, card["icon_y"])
             self.popup_bg_canvas.coords(card["temp"], center_x, forecast_top + 68)
