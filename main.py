@@ -2389,7 +2389,7 @@ class WeatherWidget(tk.Tk):
 
         self.popup_bg_canvas.coords(self.hero_city_label, pad + left_nudge, 57 + hero_shift)
         self.popup_bg_canvas.coords(self.hero_icon_label, pad + 8 + left_nudge, 157 + hero_shift)
-        self.popup_bg_canvas.coords(self.hero_temp_label, pad + 116 + left_nudge, 97 + hero_shift)
+        self.popup_bg_canvas.coords(self.hero_temp_label, pad + 116 + left_nudge, 95 + hero_shift)
 
         right_text = width - pad - 14
         right_stack_top = 58 + right_shift
