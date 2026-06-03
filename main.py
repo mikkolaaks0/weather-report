@@ -101,7 +101,7 @@ POPUP_CONTENT_PAD = 10
 POPUP_CORNER_RADIUS = 44
 POPUP_BG_OPACITY = 0.85
 POPUP_CONTROL_HEIGHT = 26
-HERO_ICON_WIDTH = 98
+HERO_ICON_WIDTH = 95
 HERO_ICON_HEIGHT = 84
 FORECAST_ICON_WIDTH = 50
 FORECAST_ICON_HEIGHT = 39
@@ -2389,7 +2389,7 @@ class WeatherWidget(tk.Tk):
 
         self.popup_bg_canvas.coords(self.hero_city_label, pad + left_nudge, 57 + hero_shift)
         self.popup_bg_canvas.coords(self.hero_icon_label, pad + 8 + left_nudge, 157 + hero_shift)
-        self.popup_bg_canvas.coords(self.hero_temp_label, pad + 116 + left_nudge, 99 + hero_shift)
+        self.popup_bg_canvas.coords(self.hero_temp_label, pad + 116 + left_nudge, 97 + hero_shift)
 
         right_text = width - pad - 14
         right_stack_top = 58 + right_shift
@@ -2440,7 +2440,7 @@ class WeatherWidget(tk.Tk):
             self.popup_bg_canvas.coords(card["icon"], center_x, card["icon_y"])
             self.popup_bg_canvas.coords(card["temp"], center_x, forecast_top + 68)
 
-        self.popup_bg_canvas.coords(self.footer_label, width - pad, height - 9)
+        self.popup_bg_canvas.coords(self.footer_label, width - pad, height - 7)
 
     def _layout_today_stats(self, right_x: int, top_y: int) -> None:
         icon_value_gap = 4
