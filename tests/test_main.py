@@ -334,6 +334,77 @@ class SettingsAndShortcutTests(unittest.TestCase):
         self.assertIn(f"{main.APP_NAME}.lnk", [path.name for path in paths])
 
 
+class TrayMenuTests(unittest.TestCase):
+    def test_source_tray_menu_exposes_and_dispatches_all_actions(self) -> None:
+        class FakeMenuItem:
+            def __init__(self, text, action, **kwargs):
+                self.text = text
+                self.action = action
+                self.options = kwargs
+
+        class FakeMenu:
+            SEPARATOR = object()
+
+            def __init__(self, *items):
+                self.items = list(items)
+
+        class FakeIcon:
+            def __init__(self, _name, _image, _title, menu):
+                self.menu = menu
+
+            def run_detached(self):
+                return None
+
+        class FakePystray:
+            MenuItem = FakeMenuItem
+            Menu = FakeMenu
+            Icon = FakeIcon
+
+        widget = object.__new__(main.WeatherWidget)
+        widget.tray_icon = None
+        widget.tray_symbol = "cloud"
+        widget._call_on_ui_thread = lambda callback: callback()
+        widget.status_var = type("Status", (), {"set": lambda _self, _value: None})()
+        calls = []
+        widget.toggle_popup = lambda: calls.append("toggle")
+        widget.refresh_weather = lambda: calls.append("refresh")
+        widget._toggle_startup_from_tray = lambda: calls.append("startup")
+        widget._create_desktop_shortcut_from_tray = lambda: calls.append("desktop")
+        widget._open_taskbar_icon_settings = lambda: calls.append("taskbar")
+        widget._quit_from_tray = lambda: calls.append("quit")
+        widget.check_for_app_update = lambda manual=False: calls.append(("update", manual))
+
+        with (
+            patch.object(main, "pystray", FakePystray),
+            patch.object(main, "Image", object()),
+            patch.object(main, "IS_FROZEN", False),
+            patch.object(main, "build_tray_symbol_icon", return_value=object()),
+        ):
+            widget._init_tray_icon()
+
+        menu_items = [item for item in widget.tray_icon.menu.items if item is not FakeMenu.SEPARATOR]
+        self.assertEqual(
+            [item.text for item in menu_items],
+            [
+                "Näytä/piilota viikkonäkymä",
+                "Päivitä sää",
+                "Tarkista sovelluspäivitys",
+                "Käynnistä tietokoneen käynnistyessä",
+                "Luo pikakuvake työpöydälle",
+                "Näytä kuvakerivissä",
+                "Lopeta",
+            ],
+        )
+
+        for item in menu_items:
+            item.action(None, item)
+
+        self.assertEqual(
+            calls,
+            ["toggle", "refresh", ("update", True), "startup", "desktop", "taskbar", "quit"],
+        )
+
+
 class UpdateSafetyTests(unittest.TestCase):
     def test_apply_update_rechecks_worktree_before_pull(self) -> None:
         with (

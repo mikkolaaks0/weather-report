@@ -1383,8 +1383,12 @@ class WeatherWidget(tk.Tk):
         def worker() -> None:
             try:
                 set_startup_enabled(True)
-            except Exception:
-                pass
+            except Exception as error:  # noqa: BLE001
+                self._call_on_ui_thread(
+                    lambda error=error: self.status_var.set(
+                        f"Startup-pikakuvakkeen korjaus epäonnistui: {error}"
+                    )
+                )
 
         self._start_background_worker(worker)
 
