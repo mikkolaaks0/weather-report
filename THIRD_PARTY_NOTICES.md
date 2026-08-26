@@ -6,7 +6,7 @@ This project uses third-party services and libraries.
 - Website: https://open-meteo.com/
 - Terms: https://open-meteo.com/en/terms
 - Licence: https://open-meteo.com/en/licence
-- Attribution used in app and docs: "Weather data by Open-Meteo.com"
+- Attribution used in app: "Säädata: Open-Meteo (CC BY 4.0)"
 
 ## pystray
 - Project: https://github.com/moses-palmer/pystray

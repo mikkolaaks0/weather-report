@@ -96,14 +96,22 @@ if ($Version -notmatch '^v\d+\.\d+\.\d+$') {
 if (git rev-parse -q --verify "refs/tags/$Version") {
     throw "Tag already exists: $Version"
 }
+$remoteTag = git ls-remote --tags origin "refs/tags/$Version"
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not check remote tag: $Version"
+}
+if ($remoteTag) {
+    throw "Tag already exists on origin: $Version"
+}
 
-$buildArgs = @('-ExecutionPolicy', 'Bypass', '-File', '.\build_release.ps1')
+$buildArgs = @('-ExecutionPolicy', 'Bypass', '-File', '.\build_release.ps1', '-Version', $Version)
 if ($SkipInstaller) {
     $buildArgs += '-SkipInstaller'
 }
 Invoke-RequiredCommand -Command 'powershell' -Arguments $buildArgs
 
 $portableZip = Join-Path $root 'release\WeatherReport-portable.zip'
+$installer = Join-Path $root 'release\WeatherReport-Setup.exe'
 $checksums = Join-Path $root 'release\SHA256SUMS.txt'
 if (-not (Test-Path $portableZip)) {
     throw "Release artifact was not found: $portableZip"
@@ -123,7 +131,12 @@ Windows tray weather app release.
 
 $releaseArgs = @(
     'release', 'create', $Version,
-    $portableZip,
+    $portableZip
+)
+if (Test-Path $installer) {
+    $releaseArgs += $installer
+}
+$releaseArgs += @(
     $checksums,
     '--title', "Weather Report $Version",
     '--notes', $notes,

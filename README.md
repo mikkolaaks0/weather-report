@@ -28,8 +28,8 @@ Python dependencies are listed in [requirements.txt](./requirements.txt).
 
 ## Install
 
-Windows users can install Weather Report with PowerShell after the first GitHub
-Release is published:
+Windows users can install Weather Report from the latest GitHub Release with
+PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/mikkolaaks0/weather-report/main/install.ps1 | iex
@@ -79,17 +79,33 @@ For a windowless launch, use:
 Create a portable release package:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build_release.ps1 -SkipInstaller
+powershell -ExecutionPolicy Bypass -File .\build_release.ps1 -Version 0.1.1 -SkipInstaller
 ```
 
 Create a portable package and an installer, when Inno Setup is installed:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build_release.ps1
+powershell -ExecutionPolicy Bypass -File .\build_release.ps1 -Version 0.1.1
 ```
 
-Release artifacts are written to `release/`.
-`SHA256SUMS.txt` is generated alongside the release files.
+Release artifacts are written to `release/`. `SHA256SUMS.txt` contains only the
+artifacts produced by the current build, so unrelated files in `release/` cannot
+leak into the published checksum manifest. The build stops before packaging if
+the test suite fails.
+
+## Test
+
+The test suite uses Python's standard library and does not need extra test
+dependencies:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+The tests cover Open-Meteo payload validation and retry behavior, formatting and
+time-window logic, settings persistence, startup paths, all mapped WMO weather
+codes, tray rendering, icon source pairs, PNG transparency, and the PyInstaller
+asset manifest.
 
 ## Bundled Assets
 
@@ -126,8 +142,9 @@ powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -Version v0.1.1 -
 
 The publish script requires a clean working tree, builds the portable package,
 pushes the current branch if needed, creates and pushes a version tag, and
-publishes `release/WeatherReport-portable.zip` plus `release/SHA256SUMS.txt` as
-GitHub Release assets.
+publishes `release/WeatherReport-portable.zip`, `release/SHA256SUMS.txt`, and the
+Inno Setup installer when one was built. The release version is also passed into
+the Windows installer metadata.
 
 The one-line installer uses the latest GitHub Release and verifies the portable
 zip when `SHA256SUMS.txt` is present.

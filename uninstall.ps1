@@ -67,10 +67,12 @@ $settingDir = Join-Path $env:APPDATA 'weather-report'
 $shortcutPaths = @(
     (Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) "$appName.lnk"),
     (Join-Path ([Environment]::GetFolderPath('Programs')) "$appName.lnk"),
+    (Join-Path ([Environment]::GetFolderPath('Startup')) 'weather-report.lnk'),
     (Join-Path ([Environment]::GetFolderPath('Startup')) "$appName.lnk")
 )
 
 Assert-SafeInstallDirectory -Path $InstallDir
+$InstallDir = Normalize-PathForSafety $InstallDir
 
 Write-Host "Uninstalling $appName..."
 

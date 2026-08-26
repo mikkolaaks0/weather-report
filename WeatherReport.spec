@@ -19,11 +19,8 @@ data_files = [
     ("README.md", "."),
     ("LICENSE", "."),
     ("THIRD_PARTY_NOTICES.md", "."),
-    ("start_weather_app.bat", "."),
-    ("start_weather_app.vbs", "."),
     ("assets/logo.png", "assets"),
     ("assets/app.ico", "assets"),
-    ("assets/tray.png", "assets"),
 ]
 for filename, destination in data_files:
     file_path = project_dir / filename
@@ -40,7 +37,14 @@ a = Analysis(
     pathex=[str(project_dir)],
     binaries=[],
     datas=datas,
-    hiddenimports=["pystray", "PIL", "PIL.Image", "PIL.ImageDraw", "PIL.ImageFont"],
+    hiddenimports=[
+        "pystray",
+        "PIL",
+        "PIL.Image",
+        "PIL.ImageDraw",
+        "PIL.ImageFilter",
+        "PIL.ImageTk",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

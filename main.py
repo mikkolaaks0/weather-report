@@ -1,5 +1,7 @@
 import json
+import math
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -15,18 +17,19 @@ from tkinter import font as tkfont
 from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 try:
     import pystray
-    from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageTk
 except Exception:  # noqa: BLE001
     pystray = None
+
+try:
+    from PIL import Image, ImageDraw, ImageFilter, ImageTk
+except Exception:  # noqa: BLE001
     Image = None
     ImageDraw = None
     ImageFilter = None
-    ImageFont = None
-    ImageOps = None
     ImageTk = None
 
 
@@ -49,16 +52,14 @@ UPDATE_BRANCH = "main"
 PROJECT_DIR = Path(__file__).resolve().parent
 RUNTIME_DIR = Path(getattr(sys, "_MEIPASS", PROJECT_DIR))
 IS_FROZEN = bool(getattr(sys, "frozen", False))
-STARTUP_TARGET_PATH = (
-    Path(sys.executable).resolve()
-    if IS_FROZEN
-    else (PROJECT_DIR / "start_weather_app.vbs").resolve()
-)
+APP_EXECUTABLE_PATH = Path(sys.executable).resolve()
+APP_WORKING_DIR = APP_EXECUTABLE_PATH.parent if IS_FROZEN else PROJECT_DIR
+
 
 def _resolve_settings_dir() -> Path:
     appdata = os.environ.get("APPDATA")
     if not appdata:
-        return PROJECT_DIR
+        return APP_WORKING_DIR
 
     appdata_path = Path(appdata)
     primary_dir = appdata_path / APP_SLUG
@@ -69,7 +70,7 @@ _settings_dir = _resolve_settings_dir()
 try:
     _settings_dir.mkdir(parents=True, exist_ok=True)
 except OSError:
-    _settings_dir = PROJECT_DIR
+    _settings_dir = APP_WORKING_DIR
 
 SETTINGS_PATH = _settings_dir / "weather_settings.json"
 ASSETS_DIR = RUNTIME_DIR / "assets"
@@ -85,7 +86,17 @@ EXO2_FONT_FILES = (
 )
 APP_FONTS_REGISTERED = False
 STARTUP_SHORTCUT_NAME = f"{APP_SLUG}.lnk"
+LEGACY_STARTUP_SHORTCUT_NAMES = (f"{APP_NAME}.lnk",)
 DESKTOP_SHORTCUT_NAME = f"{APP_NAME}.lnk"
+
+
+class WeatherServiceError(RuntimeError):
+    """The weather service returned a response the app cannot safely use."""
+
+
+class CityNotFoundError(WeatherServiceError):
+    """The requested city was not present in the geocoding response."""
+
 
 DARK_BG = "#0B0E14"
 SURFACE_BG = "#121722"
@@ -349,46 +360,13 @@ def register_app_fonts() -> None:
     APP_FONTS_REGISTERED = True
 
 
-def _load_text_font(size: int):
-    if ImageFont is None:
-        return None
-
-    candidates = [
-        r"C:\Windows\Fonts\segoeuib.ttf",
-        r"C:\Windows\Fonts\segoeui.ttf",
-        r"C:\Windows\Fonts\arialbd.ttf",
-    ]
-    for path in candidates:
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
-
-
-def _load_symbol_font(size: int):
-    if ImageFont is None:
-        return None
-
-    candidates = [
-        r"C:\Windows\Fonts\seguisym.ttf",
-        r"C:\Windows\Fonts\segoeui.ttf",
-        r"C:\Windows\Fonts\seguiemj.ttf",
-    ]
-    for path in candidates:
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
-
-
-def _normalize_tray_symbol(symbol_text: str) -> str:
-    return WEATHER_ICON_ALIASES.get((symbol_text or "").strip(), "cloud")
+def _normalize_weather_icon_key(icon_key: object) -> str:
+    normalized = icon_key.strip().lower() if isinstance(icon_key, str) else ""
+    return WEATHER_ICON_ALIASES.get(normalized, "unknown")
 
 
 def _weather_icon_path(icon_key: str) -> Path:
-    normalized = WEATHER_ICON_ALIASES.get((icon_key or "").strip(), "cloud")
+    normalized = _normalize_weather_icon_key(icon_key)
     return WEATHER_ICONS_DIR / f"{normalized}.png"
 
 
@@ -407,13 +385,22 @@ def _load_weather_icon_image(icon_key: str):
     if Image is None:
         return None
 
-    path = _weather_icon_path(icon_key)
-    if not path.exists():
-        path = _weather_icon_path("cloud")
-    try:
-        return Image.open(path).convert("RGBA")
-    except OSError:
-        return None
+    candidate_paths = (
+        _weather_icon_path(icon_key),
+        _weather_icon_path("cloud"),
+        _weather_icon_path("unknown"),
+    )
+    visited: set[Path] = set()
+    for path in candidate_paths:
+        if path in visited or not path.is_file():
+            continue
+        visited.add(path)
+        try:
+            with Image.open(path) as image:
+                return image.convert("RGBA")
+        except OSError:
+            continue
+    return None
 
 
 def _resize_weather_icon_image(image, width: int, height: int):
@@ -455,7 +442,8 @@ def _load_metric_icon_image(icon_key: str):
 
     path = _metric_icon_path(icon_key)
     try:
-        return Image.open(path).convert("RGBA")
+        with Image.open(path) as image:
+            return image.convert("RGBA")
     except OSError:
         return None
 
@@ -470,383 +458,8 @@ def build_metric_icon_photo(icon_key: str, width: int, height: int):
     return ImageTk.PhotoImage(image)
 
 
-def _new_tray_icon_canvas(size: int = 256):
-    if Image is None or ImageDraw is None:
-        return None
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    return image, ImageDraw.Draw(image)
-
-
-def _finalize_tray_icon(image):
-    if Image is None or ImageOps is None or image is None:
-        return None
-
-    # Uniform tray sizing: trim transparent margins, then scale so one dimension
-    # reaches tray bounds while keeping aspect ratio intact.
-    if "A" in image.getbands():
-        alpha = image.getchannel("A").point(lambda value: 255 if value > 20 else 0)
-        bbox = alpha.getbbox()
-    else:
-        bbox = image.getbbox()
-    if bbox:
-        image = image.crop(bbox)
-
-    resampling = getattr(Image, "Resampling", Image)
-    fitted = ImageOps.contain(image, (64, 64), method=resampling.LANCZOS)
-    icon = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    x = (64 - fitted.width) // 2
-    y = (64 - fitted.height) // 2
-    icon.paste(fitted, (x, y), fitted)
-    return icon
-
-
-def _draw_cloud_shape(draw, bbox: tuple[int, int, int, int], fill, outline, outline_width: int = 10) -> None:
-    x0, y0, x1, y1 = [int(v) for v in bbox]
-    w = x1 - x0
-    h = y1 - y0
-    draw.rounded_rectangle(
-        (x0 + int(w * 0.12), y0 + int(h * 0.43), x1 - int(w * 0.08), y1 - int(h * 0.05)),
-        radius=max(8, int(h * 0.24)),
-        fill=fill,
-        outline=outline,
-        width=outline_width,
-    )
-    draw.ellipse(
-        (x0 + int(w * 0.00), y0 + int(h * 0.30), x0 + int(w * 0.42), y1 - int(h * 0.18)),
-        fill=fill,
-        outline=outline,
-        width=outline_width,
-    )
-    draw.ellipse(
-        (x0 + int(w * 0.26), y0 + int(h * 0.08), x0 + int(w * 0.70), y1 - int(h * 0.20)),
-        fill=fill,
-        outline=outline,
-        width=outline_width,
-    )
-    draw.ellipse(
-        (x0 + int(w * 0.54), y0 + int(h * 0.22), x1, y1 - int(h * 0.16)),
-        fill=fill,
-        outline=outline,
-        width=outline_width,
-    )
-
-
-def _build_tray_crescent_icon():
-    if Image is None or ImageDraw is None or ImageFilter is None or ImageOps is None:
-        return None
-
-    canvas_size = 256
-    crescent_mask = Image.new("L", (canvas_size, canvas_size), 0)
-    crescent_draw = ImageDraw.Draw(crescent_mask)
-
-    # Build a filled crescent by subtracting a shifted circle from a full circle.
-    crescent_draw.ellipse((26, 20, 220, 214), fill=255)
-    crescent_draw.ellipse((96, 34, 252, 220), fill=0)
-
-    shadow_mask = crescent_mask.filter(ImageFilter.GaussianBlur(7))
-    out = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
-    out.paste((10, 16, 28, 235), (0, 0), shadow_mask)
-    out.paste((244, 247, 251, 255), (0, 0), crescent_mask)
-
-    return _finalize_tray_icon(out)
-
-
-def _build_tray_sun_icon():
-    result = _new_tray_icon_canvas(256)
-    if result is None:
-        return None
-    out, draw = result
-
-    ray_dark = (40, 22, 3, 205)
-    ray_light = (255, 214, 112, 255)
-    rays = [
-        ((128, 20), (128, 58)),
-        ((128, 198), (128, 236)),
-        ((20, 128), (58, 128)),
-        ((198, 128), (236, 128)),
-        ((47, 47), (74, 74)),
-        ((182, 182), (209, 209)),
-        ((47, 209), (74, 182)),
-        ((182, 74), (209, 47)),
-    ]
-    for start, end in rays:
-        draw.line((start, end), fill=ray_dark, width=22)
-        draw.line((start, end), fill=ray_light, width=14)
-
-    draw.ellipse((69, 69, 187, 187), fill=(255, 202, 88, 255), outline=(96, 53, 8, 220), width=10)
-    return _finalize_tray_icon(out)
-
-
-def _build_tray_cloud_icon():
-    if Image is None or ImageDraw is None or ImageFont is None:
-        return None
-
-    canvas = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(canvas)
-
-    emoji_font = None
-    for path in (
-        r"C:\Windows\Fonts\seguiemj.ttf",
-        r"C:\Windows\Fonts\seguisym.ttf",
-        r"C:\Windows\Fonts\segoeui.ttf",
-    ):
-        try:
-            emoji_font = ImageFont.truetype(path, 900)
-            break
-        except OSError:
-            continue
-    if emoji_font is None:
-        return None
-
-    draw.text(
-        (44, 44),
-        "☁",
-        font=emoji_font,
-        fill=(234, 241, 252, 255),
-        stroke_width=28,
-        stroke_fill=(70, 89, 118, 225),
-    )
-
-    return _finalize_tray_icon(canvas)
-
-
-def _build_tray_partly_cloudy_icon():
-    result = _new_tray_icon_canvas(256)
-    if result is None:
-        return None
-    out, draw = result
-
-    rays = [
-        ((104, 22), (104, 48)),
-        ((104, 126), (104, 154)),
-        ((54, 88), (80, 88)),
-        ((128, 88), (156, 88)),
-        ((68, 52), (86, 70)),
-        ((122, 106), (140, 124)),
-        ((68, 124), (86, 106)),
-        ((122, 70), (140, 52)),
-    ]
-    for start, end in rays:
-        draw.line((start, end), fill=(45, 24, 4, 180), width=16)
-        draw.line((start, end), fill=(255, 209, 105, 255), width=10)
-    draw.ellipse((48, 34, 160, 146), fill=(255, 200, 86, 255), outline=(110, 62, 9, 205), width=10)
-
-    _draw_cloud_shape(draw, (34, 92, 252, 246), fill=(14, 24, 40, 205), outline=None, outline_width=0)
-    _draw_cloud_shape(draw, (26, 84, 244, 238), fill=(232, 238, 248, 255), outline=(70, 88, 116, 215), outline_width=9)
-    return _finalize_tray_icon(out)
-
-
-def _build_tray_rain_icon():
-    result = _new_tray_icon_canvas(256)
-    if result is None:
-        return None
-    out, draw = result
-    _draw_cloud_shape(draw, (48, 60, 220, 186), fill=(18, 29, 48, 205), outline=None, outline_width=0)
-    _draw_cloud_shape(draw, (42, 52, 214, 178), fill=(222, 231, 245, 255), outline=(69, 89, 120, 220), outline_width=8)
-
-    drops = [
-        ((88, 168), (72, 220)),
-        ((128, 170), (112, 224)),
-        ((168, 168), (152, 220)),
-    ]
-    for start, end in drops:
-        draw.line((start, end), fill=(21, 45, 76, 205), width=16)
-        draw.line((start, end), fill=(123, 196, 255, 255), width=10)
-    return _finalize_tray_icon(out)
-
-
-def _build_tray_showers_icon():
-    result = _new_tray_icon_canvas(256)
-    if result is None:
-        return None
-    out, draw = result
-
-    rays = [
-        ((94, 38), (94, 58)),
-        ((94, 124), (94, 145)),
-        ((52, 82), (71, 82)),
-        ((116, 82), (137, 82)),
-        ((63, 51), (77, 65)),
-        ((111, 99), (125, 113)),
-        ((63, 113), (77, 99)),
-        ((111, 65), (125, 51)),
-    ]
-    for start, end in rays:
-        draw.line((start, end), fill=(45, 24, 4, 180), width=14)
-        draw.line((start, end), fill=(255, 209, 105, 255), width=8)
-    draw.ellipse((56, 44, 132, 120), fill=(255, 200, 86, 255), outline=(110, 62, 9, 205), width=8)
-
-    _draw_cloud_shape(draw, (54, 86, 224, 216), fill=(14, 24, 40, 205), outline=None, outline_width=0)
-    _draw_cloud_shape(draw, (48, 78, 218, 208), fill=(232, 238, 248, 255), outline=(70, 88, 116, 215), outline_width=8)
-
-    drops = [
-        ((118, 176), (104, 220)),
-        ((154, 176), (140, 220)),
-    ]
-    for start, end in drops:
-        draw.line((start, end), fill=(16, 41, 72, 205), width=14)
-        draw.line((start, end), fill=(117, 190, 251, 255), width=8)
-    return _finalize_tray_icon(out)
-
-
-def _build_tray_fog_icon():
-    result = _new_tray_icon_canvas(256)
-    if result is None:
-        return None
-    out, draw = result
-    _draw_cloud_shape(draw, (50, 64, 222, 186), fill=(19, 31, 52, 200), outline=None, outline_width=0)
-    _draw_cloud_shape(draw, (44, 56, 216, 178), fill=(218, 226, 240, 255), outline=(74, 93, 121, 220), outline_width=8)
-
-    fog_lines = [
-        (56, 182, 214, 182),
-        (42, 208, 196, 208),
-    ]
-    for line in fog_lines:
-        draw.line(line, fill=(25, 44, 70, 195), width=16)
-        draw.line(line, fill=(184, 201, 224, 255), width=10)
-    return _finalize_tray_icon(out)
-
-
-def _build_tray_snow_icon():
-    result = _new_tray_icon_canvas(256)
-    if result is None:
-        return None
-    out, draw = result
-    _draw_cloud_shape(draw, (48, 60, 220, 186), fill=(18, 29, 48, 205), outline=None, outline_width=0)
-    _draw_cloud_shape(draw, (42, 52, 214, 178), fill=(226, 235, 248, 255), outline=(71, 90, 119, 220), outline_width=8)
-
-    flakes = [(88, 202), (128, 214), (168, 202)]
-    for cx, cy in flakes:
-        draw.line((cx - 13, cy, cx + 13, cy), fill=(17, 38, 66, 200), width=8)
-        draw.line((cx, cy - 13, cx, cy + 13), fill=(17, 38, 66, 200), width=8)
-        draw.line((cx - 9, cy - 9, cx + 9, cy + 9), fill=(17, 38, 66, 200), width=8)
-        draw.line((cx - 9, cy + 9, cx + 9, cy - 9), fill=(17, 38, 66, 200), width=8)
-        draw.line((cx - 13, cy, cx + 13, cy), fill=(186, 232, 255, 255), width=4)
-        draw.line((cx, cy - 13, cx, cy + 13), fill=(186, 232, 255, 255), width=4)
-        draw.line((cx - 9, cy - 9, cx + 9, cy + 9), fill=(186, 232, 255, 255), width=4)
-        draw.line((cx - 9, cy + 9, cx + 9, cy - 9), fill=(186, 232, 255, 255), width=4)
-    return _finalize_tray_icon(out)
-
-
-def _build_tray_thunder_icon():
-    result = _new_tray_icon_canvas(256)
-    if result is None:
-        return None
-    out, draw = result
-    _draw_cloud_shape(draw, (48, 54, 220, 180), fill=(17, 28, 47, 205), outline=None, outline_width=0)
-    _draw_cloud_shape(draw, (42, 46, 214, 172), fill=(223, 232, 246, 255), outline=(71, 90, 119, 220), outline_width=8)
-
-    bolt = [
-        (133, 162),
-        (104, 214),
-        (132, 214),
-        (116, 248),
-        (166, 190),
-        (136, 190),
-        (152, 162),
-    ]
-    draw.polygon(bolt, fill=(46, 30, 5, 215))
-    draw.polygon([(x - 2, y - 3) for x, y in bolt], fill=(255, 211, 97, 255))
-    return _finalize_tray_icon(out)
-
-
-def _build_tray_unknown_icon():
-    result = _new_tray_icon_canvas(256)
-    if result is None:
-        return None
-    out, draw = result
-    draw.ellipse((98, 98, 158, 158), fill=(238, 243, 252, 255), outline=(80, 95, 122, 210), width=8)
-    return _finalize_tray_icon(out)
-
-
 def build_tray_symbol_icon(symbol_text: str):
-    if Image is None or ImageDraw is None or ImageOps is None:
-        return None
-
-    symbol = _normalize_tray_symbol(symbol_text)
-    asset_icon = build_weather_tray_icon(symbol)
-    if asset_icon is not None:
-        return asset_icon
-
-    builders = {
-        "sun": _build_tray_sun_icon,
-        "moon": _build_tray_crescent_icon,
-        "partly-cloudy": _build_tray_partly_cloudy_icon,
-        "partly-cloudy-night": _build_tray_partly_cloudy_icon,
-        "partly_cloudy": _build_tray_partly_cloudy_icon,
-        "cloud": _build_tray_cloud_icon,
-        "cloudy": _build_tray_cloud_icon,
-        "fog": _build_tray_fog_icon,
-        "drizzle": _build_tray_showers_icon,
-        "showers": _build_tray_showers_icon,
-        "showers-night": _build_tray_showers_icon,
-        "rain": _build_tray_rain_icon,
-        "freezing-rain": _build_tray_rain_icon,
-        "sleet": _build_tray_showers_icon,
-        "snow": _build_tray_snow_icon,
-        "snow-showers": _build_tray_snow_icon,
-        "snow-showers-night": _build_tray_snow_icon,
-        "snow-grains": _build_tray_snow_icon,
-        "ice": _build_tray_snow_icon,
-        "hail": _build_tray_snow_icon,
-        "thunder": _build_tray_thunder_icon,
-        "thunder-night": _build_tray_thunder_icon,
-        "thunder-hail": _build_tray_thunder_icon,
-        "unknown": _build_tray_unknown_icon,
-    }
-    builder = builders.get(symbol)
-    if builder:
-        custom_icon = builder()
-        if custom_icon is not None:
-            return custom_icon
-
-    fallback_symbol = {
-        "sun": "☀",
-        "moon": "🌙",
-        "partly-cloudy": "⛅",
-        "partly-cloudy-night": "☁",
-        "partly_cloudy": "⛅",
-        "cloud": "☁",
-        "cloudy": "☁",
-        "fog": "☁",
-        "drizzle": "☂",
-        "showers": "☂",
-        "showers-night": "☂",
-        "rain": "☂",
-        "freezing-rain": "☂",
-        "sleet": "☂",
-        "snow": "❄",
-        "snow-showers": "❄",
-        "snow-showers-night": "❄",
-        "snow-grains": "❄",
-        "ice": "❄",
-        "hail": "❄",
-        "thunder": "⚡",
-        "thunder-night": "⚡",
-        "thunder-hail": "⚡",
-        "unknown": "•",
-    }.get(symbol, "☁")
-
-    canvas = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(canvas)
-
-    symbol_font = _load_symbol_font(860)
-    if symbol_font is None:
-        return Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-
-    draw.text(
-        (24, 24),
-        fallback_symbol,
-        font=symbol_font,
-        fill=(244, 247, 251, 255),
-        stroke_width=24,
-        stroke_fill=(10, 16, 28, 235),
-    )
-
-    fallback_icon = _finalize_tray_icon(canvas)
-    if fallback_icon is not None:
-        return fallback_icon
-    return Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    return build_weather_tray_icon(_normalize_weather_icon_key(symbol_text))
 
 
 def _hex_to_rgb(color: str) -> tuple[int, int, int]:
@@ -859,7 +472,7 @@ def _hex_to_rgb(color: str) -> tuple[int, int, int]:
         return (0, 0, 0)
 
 
-def build_popup_background_image(width: int, height: int, theme: dict, radius: int = 44):
+def build_popup_background_image(width: int, height: int, theme: dict):
     if Image is None or ImageDraw is None or ImageFilter is None or ImageTk is None:
         return None
 
@@ -900,172 +513,10 @@ def build_popup_background_image(width: int, height: int, theme: dict, radius: i
     return ImageTk.PhotoImage(full)
 
 
-def build_humidity_fog_icon(width: int = 16, height: int = 14):
-    metric_icon = build_metric_icon_photo("fog", width, height)
-    if metric_icon is not None:
-        return metric_icon
-
-    if Image is None or ImageDraw is None or ImageTk is None:
-        return None
-
-    scale = 4
-    w = max(1, width * scale)
-    h = max(1, height * scale)
-    image = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-
-    color = (140, 199, 255, 255)
-    segments = [
-        (14, 4, 30, 9),
-        (36, 4, w - 3, 9),
-        (3, 16, 26, 21),
-        (32, 16, 43, 21),
-        (48, 16, w - 2, 21),
-        (14, 28, 31, 33),
-        (37, 28, w - 4, 33),
-        (3, 40, 22, 45),
-        (27, 40, 40, 45),
-        (46, 40, w - 2, 45),
-    ]
-    radius = 4
-    for x0, y0, x1, y1 in segments:
-        draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, fill=color)
-
-    resampling = getattr(Image, "Resampling", Image)
-    resized = image.resize((width, height), resampling.LANCZOS)
-    return ImageTk.PhotoImage(resized)
-
-
-def build_rain_probability_drop_icon(width: int = 12, height: int = 12):
-    metric_icon = build_metric_icon_photo("drop", width, height)
-    if metric_icon is not None:
-        return metric_icon
-
-    if Image is None or ImageDraw is None or ImageTk is None:
-        return None
-
-    scale = 4
-    w = max(1, width * scale)
-    h = max(1, height * scale)
-    image = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-
-    color = (140, 199, 255, 255)
-    shadow = (15, 33, 54, 110)
-    # Longer and rounder teardrop profile: narrow upper neck, fuller lower belly.
-    drop_points = [
-        (int(w * 0.50), int(h * 0.00)),
-        (int(w * 0.56), int(h * 0.04)),
-        (int(w * 0.64), int(h * 0.11)),
-        (int(w * 0.71), int(h * 0.21)),
-        (int(w * 0.77), int(h * 0.34)),
-        (int(w * 0.80), int(h * 0.48)),
-        (int(w * 0.80), int(h * 0.61)),
-        (int(w * 0.76), int(h * 0.74)),
-        (int(w * 0.69), int(h * 0.85)),
-        (int(w * 0.60), int(h * 0.93)),
-        (int(w * 0.50), int(h * 0.97)),
-        (int(w * 0.40), int(h * 0.93)),
-        (int(w * 0.31), int(h * 0.85)),
-        (int(w * 0.24), int(h * 0.74)),
-        (int(w * 0.20), int(h * 0.61)),
-        (int(w * 0.20), int(h * 0.48)),
-        (int(w * 0.23), int(h * 0.34)),
-        (int(w * 0.29), int(h * 0.21)),
-        (int(w * 0.36), int(h * 0.11)),
-        (int(w * 0.44), int(h * 0.04)),
-    ]
-    shadow_points = [(x + 1, y + 1) for x, y in drop_points]
-
-    draw.polygon(shadow_points, fill=shadow)
-    draw.polygon(drop_points, fill=color)
-    draw.ellipse(
-        (
-            int(w * 0.36),
-            int(h * 0.20),
-            int(w * 0.50),
-            int(h * 0.38),
-        ),
-        fill=(220, 241, 255, 85),
-    )
-
-    resampling = getattr(Image, "Resampling", Image)
-    resized = image.resize((width, height), resampling.LANCZOS)
-    return ImageTk.PhotoImage(resized)
-
-
-def build_wind_swirl_icon(width: int = 18, height: int = 14):
-    metric_icon = build_metric_icon_photo("wind", width, height)
-    if metric_icon is not None:
-        return metric_icon
-
-    if Image is None or ImageDraw is None or ImageTk is None:
-        return None
-
-    scale = 4
-    w = max(1, width * scale)
-    h = max(1, height * scale)
-    color = (146, 211, 229, 230)
-    stroke = max(4, int(h * 0.14))
-    canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    oversample = 3
-    draw_image = Image.new("RGBA", (w * oversample, h * oversample), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(draw_image)
-
-    def cubic(p0, p1, p2, p3, steps: int = 16) -> list[tuple[int, int]]:
-        points = []
-        for step in range(steps + 1):
-            t = step / steps
-            inv = 1 - t
-            x = (
-                inv**3 * p0[0]
-                + 3 * inv**2 * t * p1[0]
-                + 3 * inv * t**2 * p2[0]
-                + t**3 * p3[0]
-            )
-            y = (
-                inv**3 * p0[1]
-                + 3 * inv**2 * t * p1[1]
-                + 3 * inv * t**2 * p2[1]
-                + t**3 * p3[1]
-            )
-            points.append((int(x * oversample), int(y * oversample)))
-        return points
-
-    def draw_path(points: list[tuple[float, float]]) -> None:
-        scaled_points = [(int(x * w * oversample), int(y * h * oversample)) for x, y in points]
-        draw.line(scaled_points, fill=color, width=stroke * oversample, joint="curve")
-        radius = (stroke * oversample) // 2
-        for x, y in (scaled_points[0], scaled_points[-1]):
-            draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
-
-    paths = [
-        cubic((0.172 * w, 0.402 * h), (0.375 * w, 0.414 * h), (0.578 * w, 0.410 * h), (0.707 * w, 0.344 * h), 14)
-        + cubic((0.707 * w, 0.344 * h), (0.852 * w, 0.270 * h), (0.824 * w, 0.148 * h), (0.699 * w, 0.164 * h), 14)[1:]
-        + cubic((0.699 * w, 0.164 * h), (0.602 * w, 0.176 * h), (0.598 * w, 0.336 * h), (0.656 * w, 0.332 * h), 10)[1:],
-        cubic((0.051 * w, 0.508 * h), (0.273 * w, 0.531 * h), (0.527 * w, 0.527 * h), (0.766 * w, 0.453 * h), 16)
-        + cubic((0.766 * w, 0.453 * h), (0.926 * w, 0.391 * h), (1.000 * w, 0.504 * h), (0.961 * w, 0.648 * h), 16)[1:]
-        + cubic((0.961 * w, 0.648 * h), (0.914 * w, 0.801 * h), (0.734 * w, 0.746 * h), (0.754 * w, 0.602 * h), 12)[1:],
-        cubic((0.172 * w, 0.648 * h), (0.383 * w, 0.691 * h), (0.566 * w, 0.637 * h), (0.695 * w, 0.648 * h), 14)
-        + cubic((0.695 * w, 0.648 * h), (0.855 * w, 0.664 * h), (0.848 * w, 0.859 * h), (0.719 * w, 0.887 * h), 16)[1:]
-        + cubic((0.719 * w, 0.887 * h), (0.598 * w, 0.914 * h), (0.535 * w, 0.797 * h), (0.578 * w, 0.742 * h), 12)[1:],
-    ]
-
-    for path in paths:
-        draw_path([(x / w / oversample, y / h / oversample) for x, y in path])
-
-    resampling = getattr(Image, "Resampling", Image)
-    image = draw_image.resize((w, h), resampling.LANCZOS)
-    canvas.alpha_composite(image)
-
-    resampling = getattr(Image, "Resampling", Image)
-    resized = canvas.resize((width, height), resampling.LANCZOS)
-    return ImageTk.PhotoImage(resized)
-
-
 def format_clock_fi(value: datetime) -> str:
     day_short = WEEKDAY_SHORT_FI.get(value.weekday(), "")
     return f"{day_short} {value:%d.%m.%Y %H:%M:%S}"
+
 
 def load_settings() -> dict:
     settings = {
@@ -1086,42 +537,63 @@ def load_settings() -> dict:
     if not isinstance(saved, dict):
         return settings
 
-    settings.update(saved)
-
-    city = settings.get("city")
+    city = saved.get("city")
     if isinstance(city, str) and city.strip():
         settings["city"] = city.strip()
-    else:
-        settings["city"] = DEFAULT_CITY
 
-    temperature_unit = settings.get("temperature_unit")
+    temperature_unit = saved.get("temperature_unit")
     if isinstance(temperature_unit, str):
         temperature_unit = temperature_unit.strip().lower()
     if temperature_unit not in VALID_TEMPERATURE_UNITS:
         temperature_unit = "celsius"
     settings["temperature_unit"] = temperature_unit
 
-    popup_theme = settings.get("popup_theme")
-    if isinstance(popup_theme, str) and popup_theme.strip():
-        settings["popup_theme"] = popup_theme.strip().lower()
-    else:
-        settings["popup_theme"] = DEFAULT_POPUP_THEME
+    popup_theme = saved.get("popup_theme")
+    if isinstance(popup_theme, str):
+        popup_theme = popup_theme.strip().lower()
+    if popup_theme not in POPUP_THEMES:
+        popup_theme = DEFAULT_POPUP_THEME
+    settings["popup_theme"] = popup_theme
 
     return settings
 
 
 def save_settings(settings: dict) -> None:
+    temporary_path = SETTINGS_PATH.with_name(f".{SETTINGS_PATH.name}.{os.getpid()}.tmp")
     try:
-        with SETTINGS_PATH.open("w", encoding="utf-8") as handle:
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with temporary_path.open("w", encoding="utf-8") as handle:
             json.dump(settings, handle, indent=2, ensure_ascii=False)
-    except OSError:
-        pass
+            handle.write("\n")
+        os.replace(temporary_path, SETTINGS_PATH)
+    except (OSError, TypeError, ValueError):
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _get_json(url: str, params: dict) -> dict:
     query = urlencode(params)
-    with urlopen(f"{url}?{query}", timeout=12) as response:
-        return json.loads(response.read().decode("utf-8"))
+    request = Request(
+        f"{url}?{query}",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": f"{APP_SLUG}-desktop",
+        },
+    )
+    with urlopen(request, timeout=12) as response:
+        raw_payload = response.read()
+        charset = response.headers.get_content_charset() or "utf-8"
+
+    try:
+        payload = json.loads(raw_payload.decode(charset))
+    except (LookupError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise WeatherServiceError("Sääpalvelu palautti virheellisen vastauksen.") from error
+
+    if not isinstance(payload, dict):
+        raise WeatherServiceError("Sääpalvelun vastaus oli väärässä muodossa.")
+    return payload
 
 
 def geocode_city(city_name: str) -> dict:
@@ -1135,9 +607,17 @@ def geocode_city(city_name: str) -> dict:
         },
     )
     results = payload.get("results", [])
+    if not isinstance(results, list):
+        raise WeatherServiceError("Paikkatiedon vastaus oli väärässä muodossa.")
     if not results:
-        raise ValueError("Paikkakuntaa ei löytynyt.")
-    return results[0]
+        raise CityNotFoundError("Paikkakuntaa ei löytynyt.")
+
+    place = results[0]
+    if not isinstance(place, dict):
+        raise WeatherServiceError("Paikkatiedon vastaus oli väärässä muodossa.")
+
+    latitude, longitude = _coordinates_from_place(place)
+    return {**place, "latitude": latitude, "longitude": longitude}
 
 
 def get_weather(latitude: float, longitude: float, temperature_unit: str = "celsius") -> dict:
@@ -1154,7 +634,6 @@ def get_weather(latitude: float, longitude: float, temperature_unit: str = "cels
                     "weather_code",
                     "wind_speed_10m",
                     "wind_direction_10m",
-                    "precipitation",
                     "is_day",
                 ]
             ),
@@ -1177,7 +656,91 @@ def get_weather(latitude: float, longitude: float, temperature_unit: str = "cels
     )
 
 
-def resolve_weather_style(code: int | None, is_day: bool = True) -> WeatherStyle:
+def _request_with_retry(
+    operation: Callable[[], dict],
+    attempts: int = 2,
+    retry_delay_seconds: float = 1.0,
+) -> dict:
+    attempts = max(1, attempts)
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except HTTPError as error:
+            retryable = error.code in {408, 425, 429} or error.code >= 500
+            if not retryable or attempt == attempts - 1:
+                raise
+            time.sleep(max(0.0, retry_delay_seconds))
+        except (URLError, TimeoutError):
+            if attempt == attempts - 1:
+                raise
+            time.sleep(max(0.0, retry_delay_seconds))
+    raise RuntimeError("Verkkopyyntö ei palauttanut tulosta.")
+
+
+def _as_dict(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: object) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _sequence_item(values: object, index: int = 0) -> object | None:
+    sequence = _as_list(values)
+    return sequence[index] if 0 <= index < len(sequence) else None
+
+
+def _clean_text(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _coerce_number(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _coordinates_from_place(place: object) -> tuple[float, float]:
+    place_data = _as_dict(place)
+    latitude = _coerce_number(place_data.get("latitude"))
+    longitude = _coerce_number(place_data.get("longitude"))
+    if (
+        latitude is None
+        or longitude is None
+        or not -90 <= latitude <= 90
+        or not -180 <= longitude <= 180
+    ):
+        raise WeatherServiceError("Paikkatiedosta puuttuivat kelvolliset koordinaatit.")
+    return latitude, longitude
+
+
+def _is_daytime(value: object) -> bool:
+    number = _coerce_number(value)
+    return True if number is None else number != 0
+
+
+def validate_weather_payload(weather: object) -> None:
+    weather_data = _as_dict(weather)
+    current = _as_dict(weather_data.get("current"))
+    daily = _as_dict(weather_data.get("daily"))
+    if not current:
+        raise WeatherServiceError("Sääpalvelun vastauksesta puuttui nykytila.")
+    weather_code = _coerce_number(current.get("weather_code"))
+    if weather_code is None or not weather_code.is_integer():
+        raise WeatherServiceError("Sääpalvelun vastauksesta puuttui kelvollinen säätilakoodi.")
+    if _coerce_number(current.get("temperature_2m")) is None:
+        raise WeatherServiceError("Sääpalvelun vastauksesta puuttui lämpötila.")
+    if not _as_list(daily.get("time")):
+        raise WeatherServiceError("Sääpalvelun vastauksesta puuttui päiväennuste.")
+
+
+def resolve_weather_style(code: int | float | str | None, is_day: bool = True) -> WeatherStyle:
+    numeric_code = _coerce_number(code)
+    code = int(numeric_code) if numeric_code is not None and numeric_code.is_integer() else None
     if code == 0:
         return WeatherStyle(
             icon="☀" if is_day else "🌙",
@@ -1234,22 +797,27 @@ def resolve_weather_style(code: int | None, is_day: bool = True) -> WeatherStyle
     return WeatherStyle(icon="•", icon_key="unknown", label="Tuntematon", accent="#D5DAE3")
 
 
-def format_temperature(value: float | int | None, unit_symbol: str) -> str:
-    if value is None:
-        return f"-°{unit_symbol}"
-    return f"{round(value)}°{unit_symbol}"
+def format_temperature(value: object, unit_symbol: str) -> str:
+    number = _coerce_number(value)
+    normalized_unit = _clean_text(unit_symbol)
+    if number is None:
+        return f"-°{normalized_unit}"
+    return f"{round(number)}°{normalized_unit}"
 
 
-def format_metric(value: float | int | None, suffix: str = "", decimals: int = 0) -> str:
-    if value is None:
+def format_metric(value: object, suffix: str = "", decimals: int = 0) -> str:
+    number = _coerce_number(value)
+    if number is None:
         return "-"
+    decimals = max(0, int(decimals))
     if decimals:
-        return f"{value:.{decimals}f}{suffix}"
-    return f"{round(value)}{suffix}"
+        return f"{number:.{decimals}f}{suffix}"
+    return f"{round(number)}{suffix}"
 
 
-def format_wind_direction(value: float | int | None) -> str:
-    if value is None:
+def format_wind_direction(value: object) -> str:
+    number = _coerce_number(value)
+    if number is None:
         return "-"
 
     directions = [
@@ -1270,57 +838,68 @@ def format_wind_direction(value: float | int | None) -> str:
         "luode",
         "pohjoisluode",
     ]
-    index = int((float(value) + 11.25) % 360 // 22.5)
+    index = int((number + 11.25) % 360 // 22.5)
     return directions[index]
 
 
-def format_time_short(value: str | None) -> str:
+def format_time_short(value: object) -> str:
     parsed = _parse_open_meteo_time(value)
     return parsed.strftime("%H:%M") if parsed else "-"
 
 
-def _parse_open_meteo_time(value: str | None) -> datetime | None:
-    if not value:
+def _parse_open_meteo_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
         return None
 
-    for pattern in ("%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            return datetime.strptime(value, pattern)
-        except ValueError:
-            continue
-    return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
 
 
 def max_precipitation_probability_next_hours(
-    weather: dict,
+    weather: object,
     hours: int = RAIN_PROBABILITY_LOOKAHEAD_HOURS,
 ) -> int | None:
-    current_time = _parse_open_meteo_time(weather.get("current", {}).get("time"))
-    hourly = weather.get("hourly", {})
-    times = hourly.get("time", [])
-    probabilities = hourly.get("precipitation_probability", [])
+    if hours <= 0:
+        return None
+
+    weather_data = _as_dict(weather)
+    current = _as_dict(weather_data.get("current"))
+    hourly = _as_dict(weather_data.get("hourly"))
+    current_time = _parse_open_meteo_time(current.get("time"))
+    times = _as_list(hourly.get("time"))
+    probabilities = _as_list(hourly.get("precipitation_probability"))
     if current_time is None or not times or not probabilities:
         return None
 
     window_end = current_time + timedelta(hours=hours)
-    values = []
+    values: list[float] = []
     for time_text, probability in zip(times, probabilities):
         hour_time = _parse_open_meteo_time(time_text)
-        if hour_time is None or probability is None:
+        probability_value = _coerce_number(probability)
+        if hour_time is None or probability_value is None or not 0 <= probability_value <= 100:
             continue
-        if current_time <= hour_time < window_end:
-            values.append(probability)
+        try:
+            in_window = current_time <= hour_time < window_end
+        except TypeError:
+            in_window = False
+        if in_window:
+            values.append(probability_value)
 
     if not values:
         return None
     return round(max(values))
 
 
-def format_city(place: dict) -> str:
-    city = place.get("name", "-")
-    admin1 = place.get("admin1")
-    country = place.get("country", "-")
-    return f"{city}, {admin1}" if admin1 else f"{city}, {country}"
+def format_city(place: object) -> str:
+    place_data = _as_dict(place)
+    city = _clean_text(place_data.get("name")) or "-"
+    region = _clean_text(place_data.get("admin1")) or _clean_text(place_data.get("country"))
+    return f"{city}, {region}" if region else city
 
 
 def get_startup_shortcut_path(name: str = STARTUP_SHORTCUT_NAME) -> Path:
@@ -1340,7 +919,8 @@ def get_desktop_shortcut_path(name: str = DESKTOP_SHORTCUT_NAME) -> Path:
 
 def get_startup_shortcut_paths() -> list[Path]:
     primary = get_startup_shortcut_path()
-    return [primary]
+    legacy_paths = [get_startup_shortcut_path(name) for name in LEGACY_STARTUP_SHORTCUT_NAMES]
+    return list(dict.fromkeys([primary, *legacy_paths]))
 
 
 def is_startup_enabled() -> bool:
@@ -1355,23 +935,29 @@ def _ps_escape(text: str) -> str:
 
 
 def _resolve_pythonw_executable() -> Path | None:
-    local_appdata = os.environ.get("LOCALAPPDATA")
-    if local_appdata:
-        for version in ["313", "312", "311", "310"]:
-            path = Path(local_appdata) / "Programs" / "Python" / f"Python{version}" / "pythonw.exe"
-            if path.exists():
-                return path
-
     current_python = Path(sys.executable).resolve()
     sibling_pythonw = current_python.with_name("pythonw.exe")
-    if sibling_pythonw.exists():
+    if sibling_pythonw.is_file():
         return sibling_pythonw
 
     candidate = shutil.which("pythonw")
     if candidate:
         candidate_path = Path(candidate)
-        if candidate_path.exists():
+        if candidate_path.is_file():
             return candidate_path
+
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        python_root = Path(local_appdata) / "Programs" / "Python"
+
+        def version_key(path: Path) -> int:
+            suffix = path.name.removeprefix("Python")
+            return int(suffix) if suffix.isdigit() else -1
+
+        for install_dir in sorted(python_root.glob("Python*"), key=version_key, reverse=True):
+            path = install_dir / "pythonw.exe"
+            if path.is_file():
+                return path
 
     return None
 
@@ -1391,17 +977,17 @@ def _hidden_subprocess_kwargs() -> dict:
 
 def _resolve_shortcut_target() -> tuple[str, str, str, str]:
     if IS_FROZEN:
-        target_path = str(STARTUP_TARGET_PATH)
+        target_path = str(APP_EXECUTABLE_PATH)
         arguments = ""
-        working_dir = str(STARTUP_TARGET_PATH.parent)
-        icon_source = APP_ICON_PATH if APP_ICON_PATH.exists() else STARTUP_TARGET_PATH
+        working_dir = str(APP_EXECUTABLE_PATH.parent)
+        icon_source = APP_ICON_PATH if APP_ICON_PATH.exists() else APP_EXECUTABLE_PATH
     else:
         pythonw_path = _resolve_pythonw_executable()
         if pythonw_path is None:
             raise FileNotFoundError("pythonw.exe ei löytynyt. Asenna Python Windowsille.")
 
         target_path = str(pythonw_path)
-        arguments = str((PROJECT_DIR / "main.py").resolve())
+        arguments = subprocess.list2cmdline([str((PROJECT_DIR / "main.py").resolve())])
         working_dir = str(PROJECT_DIR)
         icon_source = APP_ICON_PATH if APP_ICON_PATH.exists() else pythonw_path
 
@@ -1411,8 +997,8 @@ def _resolve_shortcut_target() -> tuple[str, str, str, str]:
 def create_windows_shortcut(shortcut_path: Path) -> None:
     shortcut_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if not STARTUP_TARGET_PATH.exists() and IS_FROZEN:
-        raise FileNotFoundError(f"Käynnistyskohdetta ei löytynyt: {STARTUP_TARGET_PATH.name}")
+    if IS_FROZEN and not APP_EXECUTABLE_PATH.exists():
+        raise FileNotFoundError(f"Käynnistyskohdetta ei löytynyt: {APP_EXECUTABLE_PATH.name}")
 
     shell_path = shutil.which("powershell") or shutil.which("pwsh")
     if not shell_path:
@@ -1436,11 +1022,14 @@ def create_windows_shortcut(shortcut_path: Path) -> None:
             check=True,
             capture_output=True,
             text=True,
+            timeout=20,
             **_hidden_subprocess_kwargs(),
         )
     except subprocess.CalledProcessError as error:
         details = (error.stderr or error.stdout or "").strip()
         raise OSError(f"Pikakuvakkeen luonti epäonnistui: {details or error}") from error
+    except subprocess.TimeoutExpired as error:
+        raise OSError("Pikakuvakkeen luonti aikakatkaistiin.") from error
 
 
 def set_startup_enabled(enabled: bool) -> None:
@@ -1453,11 +1042,10 @@ def set_startup_enabled(enabled: bool) -> None:
                 candidate.unlink()
         return
 
+    create_windows_shortcut(shortcut_path)
     for candidate in shortcut_paths:
         if candidate != shortcut_path and candidate.exists():
             candidate.unlink()
-
-    create_windows_shortcut(shortcut_path)
 
 
 def create_desktop_shortcut() -> Path:
@@ -1538,6 +1126,9 @@ def apply_github_update() -> None:
             f"{UPDATE_BRANCH}-branchissa. Nykyinen branch: {branch_label}."
         )
 
+    if _git_output(["status", "--porcelain"]):
+        raise RuntimeError("Paikallisia muutoksia on auki, päivitystä ei tehdä automaattisesti.")
+
     result = _run_git_command(["pull", "--ff-only", UPDATE_REMOTE, UPDATE_BRANCH], timeout=120)
     if result.returncode != 0:
         details = (result.stderr or result.stdout or "").strip()
@@ -1546,7 +1137,7 @@ def apply_github_update() -> None:
 
 def restart_application() -> None:
     if IS_FROZEN:
-        args = [str(Path(sys.executable).resolve())]
+        args = [str(APP_EXECUTABLE_PATH)]
     else:
         executable = Path(sys.executable).resolve()
         if executable.name.lower() == "python.exe":
@@ -1557,7 +1148,7 @@ def restart_application() -> None:
 
     subprocess.Popen(  # noqa: S603
         args,
-        cwd=str(PROJECT_DIR),
+        cwd=str(APP_WORKING_DIR),
         close_fds=True,
         **_hidden_subprocess_kwargs(),
     )
@@ -1581,11 +1172,16 @@ class WeatherWidget(tk.Tk):
         if initial_theme_id != self.popup_theme_id:
             save_settings(self.settings)
         self.fetch_in_progress = False
+        self.pending_city_search: str | None = None
         self.update_check_in_progress = False
+        self._is_destroying = False
+        self._ui_thread_id = threading.get_ident()
+        self._ui_callbacks: queue.SimpleQueue[Callable[[], None]] = queue.SimpleQueue()
         self.refresh_job: str | None = None
         self.clock_job: str | None = None
         self.bootstrap_job: str | None = None
         self.update_job: str | None = None
+        self.ui_poll_job: str | None = None
         self.popup: tk.Toplevel | None = None
         self.forecast_cards: list[dict] = []
         self.latest_place: dict | None = None
@@ -1596,9 +1192,9 @@ class WeatherWidget(tk.Tk):
         self.popup_bg_photo = None
         self.weather_icon_photo_cache: dict[tuple[str, int, int], tk.PhotoImage] = {}
         self.rain_mm_umbrella_icon_photo = build_metric_icon_photo("umbrella", 14, 14)
-        self.rain_prob_drop_icon_photo = build_rain_probability_drop_icon(width=12, height=14)
-        self.humidity_fog_icon_photo = build_humidity_fog_icon()
-        self.wind_swirl_icon_photo = build_wind_swirl_icon()
+        self.rain_prob_drop_icon_photo = build_metric_icon_photo("drop", 12, 14)
+        self.humidity_fog_icon_photo = build_metric_icon_photo("fog", 16, 14)
+        self.wind_swirl_icon_photo = build_metric_icon_photo("wind", 18, 14)
         self.sunrise_sun_icon_photo = self._weather_icon_photo("sun", SUN_EVENT_ICON_SIZE, SUN_EVENT_ICON_SIZE)
         self.sunset_moon_icon_photo = self._weather_icon_photo("moon", SUN_EVENT_ICON_SIZE, SUN_EVENT_ICON_SIZE)
         self.popup_bg_size: tuple[int, int, str] | None = None
@@ -1617,6 +1213,7 @@ class WeatherWidget(tk.Tk):
 
         self.bind("<Escape>", lambda _: self._hide_popup())
         self.after(200, self._position_widget)
+        self.ui_poll_job = self.after(50, self._drain_ui_callbacks)
         self.clock_job = self.after(300, self._tick_clock)
         self.bootstrap_job = self.after(700, self.refresh_weather)
         if not IS_FROZEN:
@@ -1638,7 +1235,7 @@ class WeatherWidget(tk.Tk):
                 pass
 
     def _weather_icon_photo(self, icon_key: str, width: int, height: int):
-        normalized = WEATHER_ICON_ALIASES.get((icon_key or "").strip(), "cloud")
+        normalized = _normalize_weather_icon_key(icon_key)
         cache_key = (normalized, int(width), int(height))
         cached = self.weather_icon_photo_cache.get(cache_key)
         if cached is not None:
@@ -1671,20 +1268,15 @@ class WeatherWidget(tk.Tk):
         icon_key: str,
         width: int,
         height: int,
-        fallback_symbol: str,
-        accent: str,
     ) -> None:
         photo = self._weather_icon_photo(icon_key, width, height)
-        item_type = self.popup_bg_canvas.type(item_id)
-        if photo is not None and item_type == "image":
+        if photo is not None:
             self.popup_bg_canvas.itemconfigure(item_id, image=photo, state="normal")
             return
-
-        if item_type == "text":
-            self.popup_bg_canvas.itemconfigure(item_id, text=fallback_symbol, fill=accent, state="normal")
+        self.popup_bg_canvas.itemconfigure(item_id, state="hidden")
 
     def _init_tray_icon(self) -> None:
-        if pystray is None or Image is None or ImageDraw is None or ImageOps is None:
+        if pystray is None or Image is None:
             self.status_var.set("Tray-tuki puuttuu (pystray/pillow).")
             self.deiconify()
             return
@@ -1692,39 +1284,57 @@ class WeatherWidget(tk.Tk):
         menu_items = [
             pystray.MenuItem(
                 "Näytä/piilota viikkonäkymä",
-                lambda icon, item: self.after(0, self._toggle_popup_from_tray),
+                lambda _icon, _item: self._call_on_ui_thread(self.toggle_popup),
                 default=True,
             ),
-            pystray.MenuItem("Päivitä sää", lambda icon, item: self.after(0, self.refresh_weather)),
+            pystray.MenuItem(
+                "Päivitä sää",
+                lambda _icon, _item: self._call_on_ui_thread(self.refresh_weather),
+            ),
             pystray.MenuItem(
                 "Käynnistä tietokoneen käynnistyessä",
-                lambda icon, item: self.after(0, self._toggle_startup_from_tray),
-                checked=lambda item: is_startup_enabled(),
+                lambda _icon, _item: self._call_on_ui_thread(self._toggle_startup_from_tray),
+                checked=lambda _item: is_startup_enabled(),
             ),
             pystray.MenuItem(
                 "Luo pikakuvake työpöydälle",
-                lambda icon, item: self.after(0, self._create_desktop_shortcut_from_tray),
+                lambda _icon, _item: self._call_on_ui_thread(self._create_desktop_shortcut_from_tray),
             ),
             pystray.MenuItem(
                 "Näytä kuvakerivissä",
-                lambda icon, item: self.after(0, self._open_taskbar_icon_settings),
+                lambda _icon, _item: self._call_on_ui_thread(self._open_taskbar_icon_settings),
             ),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Lopeta", lambda icon, item: self.after(0, self._quit_from_tray)),
+            pystray.MenuItem(
+                "Lopeta",
+                lambda _icon, _item: self._call_on_ui_thread(self._quit_from_tray),
+            ),
         ]
         if not IS_FROZEN:
             menu_items.insert(
                 2,
                 pystray.MenuItem(
                     "Tarkista sovelluspäivitys",
-                    lambda icon, item: self.after(0, lambda: self.check_for_app_update(manual=True)),
+                    lambda _icon, _item: self._call_on_ui_thread(
+                        lambda: self.check_for_app_update(manual=True)
+                    ),
                 ),
             )
         menu = pystray.Menu(*menu_items)
 
         tray_image = build_tray_symbol_icon(self.tray_symbol)
-        self.tray_icon = pystray.Icon(APP_SLUG, tray_image, APP_NAME, menu)
-        self.tray_icon.run_detached()
+        if tray_image is None:
+            self.status_var.set("Tray-kuvaketta ei voitu luoda.")
+            self.deiconify()
+            return
+
+        try:
+            self.tray_icon = pystray.Icon(APP_SLUG, tray_image, APP_NAME, menu)
+            self.tray_icon.run_detached()
+        except Exception as error:  # noqa: BLE001
+            self.tray_icon = None
+            self.status_var.set(f"Tray-kuvakkeen käynnistys epäonnistui: {error}")
+            self.deiconify()
 
     def _stop_tray_icon(self) -> None:
         if self.tray_icon is None:
@@ -1751,6 +1361,7 @@ class WeatherWidget(tk.Tk):
             return
 
         self.status_var.set(f"Pikakuvake luotu: {shortcut_path.name}")
+        messagebox.showinfo(APP_NAME, f"Pikakuvake luotiin työpöydälle: {shortcut_path.name}")
 
     def _open_taskbar_icon_settings(self) -> None:
         if os.name != "nt":
@@ -1819,6 +1430,11 @@ class WeatherWidget(tk.Tk):
         message = status.get("message", "Sovelluspäivitystä ei voitu tarkistaa.")
         if manual or state not in {"current"}:
             self.status_var.set(message)
+        if manual:
+            if state == "error":
+                messagebox.showerror(APP_NAME, message)
+            else:
+                messagebox.showinfo(APP_NAME, message)
 
     def _apply_app_update(self) -> None:
         self.status_var.set("Päivitetään sovellusta GitHubista...")
@@ -1846,19 +1462,6 @@ class WeatherWidget(tk.Tk):
             return
         self.after(300, self.destroy)
 
-    def _toggle_popup_from_tray(self) -> None:
-        if not self.popup:
-            return
-
-        if self.popup.winfo_viewable():
-            self._hide_popup()
-            return
-
-        self._ensure_fresh_weather()
-        self.popup.deiconify()
-        self.popup.lift()
-        self._position_popup()
-
     def _update_tray_symbol(self, symbol_text: str, title_text: str) -> None:
         self.tray_symbol = symbol_text
         if not self.tray_icon:
@@ -1876,13 +1479,39 @@ class WeatherWidget(tk.Tk):
         threading.Thread(target=target, daemon=True).start()
 
     def _call_on_ui_thread(self, callback: Callable[[], None]) -> None:
-        try:
-            self.after(0, callback)
-        except (RuntimeError, tk.TclError):
-            pass
+        if self._is_destroying:
+            return
+        if threading.get_ident() == self._ui_thread_id:
+            callback()
+            return
+        self._ui_callbacks.put(callback)
+
+    def _drain_ui_callbacks(self) -> None:
+        self.ui_poll_job = None
+        if self._is_destroying:
+            return
+
+        for _ in range(100):
+            try:
+                callback = self._ui_callbacks.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback()
+            except Exception:  # noqa: BLE001
+                self.report_callback_exception(*sys.exc_info())
+            if self._is_destroying:
+                break
+
+        if not self._is_destroying:
+            self.ui_poll_job = self.after(50, self._drain_ui_callbacks)
 
     def destroy(self) -> None:
-        for job_name in ("clock_job", "refresh_job", "bootstrap_job", "update_job"):
+        if self._is_destroying:
+            return
+        self._is_destroying = True
+
+        for job_name in ("clock_job", "refresh_job", "bootstrap_job", "update_job", "ui_poll_job"):
             job_id = getattr(self, job_name, None)
             if job_id is None:
                 continue
@@ -2050,16 +1679,6 @@ class WeatherWidget(tk.Tk):
             anchor="nw",
             font=(DISPLAY_FONT, 54, "bold"),
             fill="#FFFFFF",
-        )
-        self.today_stats_label = self.popup_bg_canvas.create_text(
-            0,
-            0,
-            text="",
-            anchor="ne",
-            font=(TEXT_FONT, 11),
-            fill="#F2F6FF",
-            justify="right",
-            state="hidden",
         )
         if self.rain_mm_umbrella_icon_photo is not None:
             self.today_rain_mm_icon_label = self.popup_bg_canvas.create_image(
@@ -2299,8 +1918,6 @@ class WeatherWidget(tk.Tk):
             "cloud",
             HERO_ICON_WIDTH,
             HERO_ICON_HEIGHT,
-            "☁",
-            "#F5F8FF",
         )
         for card in self.forecast_cards:
             self._configure_canvas_weather_icon(
@@ -2308,10 +1925,7 @@ class WeatherWidget(tk.Tk):
                 "unknown",
                 FORECAST_ICON_WIDTH,
                 FORECAST_ICON_HEIGHT,
-                "•",
-                TEXT_MUTED,
             )
-
 
         self.location_entry_window = self.popup_bg_canvas.create_window(
             0,
@@ -2354,20 +1968,13 @@ class WeatherWidget(tk.Tk):
     def _layout_popup_content(self, width: int, height: int) -> None:
         pad = POPUP_CONTENT_PAD + 8
         left_nudge = 5
-        base_height = 338
-        extra_height = max(0, height - base_height)
 
-        top_shift = int(extra_height * 0.08)
-        hero_shift = int(extra_height * 0.12)
-        right_shift = int(extra_height * 0.10)
-        forecast_shift = int(extra_height * 0.00)
-
-        self.popup_bg_canvas.coords(self.clock_label, pad + left_nudge, 12 + top_shift)
+        self.popup_bg_canvas.coords(self.clock_label, pad + left_nudge, 12)
         self.popup_bg_canvas.itemconfigure(self.clock_label, text=self.clock_var.get())
-        self.popup_bg_canvas.coords(self.hero_updated_label, pad + left_nudge, 32 + top_shift)
+        self.popup_bg_canvas.coords(self.hero_updated_label, pad + left_nudge, 32)
 
         self.popup.update_idletasks()
-        control_y = 12 + top_shift
+        control_y = 12
         gap = 4
         right = width - pad
 
@@ -2387,12 +1994,30 @@ class WeatherWidget(tk.Tk):
         label_width = (label_bbox[2] - label_bbox[0]) if label_bbox else 56
         self.popup_bg_canvas.coords(self.theme_dot_item, right - label_width - 8, control_y + 2)
 
-        self.popup_bg_canvas.coords(self.hero_city_label, pad + left_nudge, 57 + hero_shift)
-        self.popup_bg_canvas.coords(self.hero_icon_label, pad + 8 + left_nudge, 157 + hero_shift)
-        self.popup_bg_canvas.coords(self.hero_temp_label, pad + 116 + left_nudge, 95 + hero_shift)
+        self.popup_bg_canvas.coords(self.hero_city_label, pad + left_nudge, 57)
+        self.popup_bg_canvas.coords(self.hero_icon_label, pad + 8 + left_nudge, 157)
+        self.popup_bg_canvas.coords(self.hero_temp_label, pad + 116 + left_nudge, 95)
 
         right_text = width - pad - 14
-        right_stack_top = 58 + right_shift
+        right_stack_top = 58
+        self._layout_today_weather_stack(right_text, right_stack_top)
+
+        forecast_top = height - 116
+        forecast_side_inset = 12
+        forecast_left = pad + forecast_side_inset
+        usable_width = max(1, width - (forecast_left * 2))
+        col_width = usable_width / max(1, POPUP_FORECAST_DAYS)
+        for index, card in enumerate(self.forecast_cards):
+            center_x = int(forecast_left + (index + 0.5) * col_width)
+            card["center_x"] = center_x
+            card["icon_y"] = forecast_top + 22
+            self.popup_bg_canvas.coords(card["day"], center_x, forecast_top)
+            self.popup_bg_canvas.coords(card["icon"], center_x, card["icon_y"])
+            self.popup_bg_canvas.coords(card["temp"], center_x, forecast_top + 68)
+
+        self.popup_bg_canvas.coords(self.footer_label, width - pad, height - 7)
+
+    def _layout_today_weather_stack(self, right_text: int, right_stack_top: int) -> None:
         self.popup_bg_canvas.coords(self.today_condition_label, right_text - 4, right_stack_top + 2)
         self.popup_bg_canvas.coords(self.today_hilo_label, right_text, right_stack_top + 38)
         sun_row_y = right_stack_top + 67
@@ -2411,12 +2036,10 @@ class WeatherWidget(tk.Tk):
             sunset_left - icon_time_gap - sun_event_icon_left_nudge,
             sun_row_y + sun_event_icon_y_offset,
         )
-        self.popup.update_idletasks()
         moon_bbox = self.popup_bg_canvas.bbox(self.today_moon_icon_label)
         moon_left = moon_bbox[0] if moon_bbox else (sunset_left - 14)
 
         self.popup_bg_canvas.coords(self.today_sunrise_time_label, moon_left - group_gap, sun_row_y)
-        self.popup.update_idletasks()
         sunrise_bbox = self.popup_bg_canvas.bbox(self.today_sunrise_time_label)
         sunrise_left = sunrise_bbox[0] if sunrise_bbox else (moon_left - 42)
 
@@ -2426,21 +2049,6 @@ class WeatherWidget(tk.Tk):
             sun_row_y + sun_event_icon_y_offset,
         )
         self._layout_today_stats(right_text, right_stack_top + 91)
-
-        forecast_top = (height - 116) - forecast_shift
-        forecast_side_inset = 12
-        forecast_left = pad + forecast_side_inset
-        usable_width = max(1, width - (forecast_left * 2))
-        col_width = usable_width / max(1, POPUP_FORECAST_DAYS)
-        for index, card in enumerate(self.forecast_cards):
-            center_x = int(forecast_left + (index + 0.5) * col_width)
-            card["center_x"] = center_x
-            card["icon_y"] = forecast_top + 22
-            self.popup_bg_canvas.coords(card["day"], center_x, forecast_top)
-            self.popup_bg_canvas.coords(card["icon"], center_x, card["icon_y"])
-            self.popup_bg_canvas.coords(card["temp"], center_x, forecast_top + 68)
-
-        self.popup_bg_canvas.coords(self.footer_label, width - pad, height - 7)
 
     def _layout_today_stats(self, right_x: int, top_y: int) -> None:
         icon_value_gap = 4
@@ -2486,7 +2094,11 @@ class WeatherWidget(tk.Tk):
         self.popup_bg_canvas.coords(self.today_wind_value_label, right_x, wind_y)
         wind_bbox = self.popup_bg_canvas.bbox(self.today_wind_value_label)
         wind_left = wind_bbox[0] if wind_bbox else (right_x - 72)
-        self.popup_bg_canvas.coords(self.today_wind_icon_label, wind_left - icon_value_gap, wind_y + wind_icon_y_offset)
+        self.popup_bg_canvas.coords(
+            self.today_wind_icon_label,
+            wind_left - icon_value_gap,
+            wind_y + wind_icon_y_offset,
+        )
 
     def _draw_popup_gradient(self, width: int, height: int) -> None:
         if width <= 0 or height <= 0:
@@ -2499,7 +2111,7 @@ class WeatherWidget(tk.Tk):
 
         self.popup_bg_size = cache_key
         self.popup_bg_canvas.delete("grad")
-        self.popup_bg_photo = build_popup_background_image(width, height, theme=theme, radius=POPUP_CORNER_RADIUS)
+        self.popup_bg_photo = build_popup_background_image(width, height, theme=theme)
         if self.popup_bg_photo is not None:
             self.popup_bg_canvas.create_image(0, 0, anchor="nw", image=self.popup_bg_photo, tags="grad")
             self.popup_bg_canvas.tag_lower("grad")
@@ -2510,14 +2122,25 @@ class WeatherWidget(tk.Tk):
 
         try:
             import ctypes
+            from ctypes import wintypes
 
             width = max(1, self.popup.winfo_width())
             height = max(1, self.popup.winfo_height())
             hwnd = self.popup.winfo_id()
 
-            region = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, width + 1, height + 1, radius, radius)
-            if region and not ctypes.windll.user32.SetWindowRgn(hwnd, region, True):
-                ctypes.windll.gdi32.DeleteObject(region)
+            create_region = ctypes.windll.gdi32.CreateRoundRectRgn
+            create_region.argtypes = [ctypes.c_int] * 6
+            create_region.restype = wintypes.HANDLE
+            set_window_region = ctypes.windll.user32.SetWindowRgn
+            set_window_region.argtypes = [wintypes.HWND, wintypes.HANDLE, wintypes.BOOL]
+            set_window_region.restype = ctypes.c_int
+            delete_object = ctypes.windll.gdi32.DeleteObject
+            delete_object.argtypes = [wintypes.HGDIOBJ]
+            delete_object.restype = wintypes.BOOL
+
+            region = create_region(0, 0, width + 1, height + 1, radius, radius)
+            if region and not set_window_region(hwnd, region, True):
+                delete_object(region)
         except Exception:
             pass
 
@@ -2547,8 +2170,8 @@ class WeatherWidget(tk.Tk):
         self.update_idletasks()
         width = 322
         height = 84
-        x_pos = self.winfo_screenwidth() - width - 20
-        y_pos = self.winfo_screenheight() - height - 70
+        x_pos = max(0, self.winfo_screenwidth() - width - 20)
+        y_pos = max(0, self.winfo_screenheight() - height - 70)
         self.geometry(f"{width}x{height}+{x_pos}+{y_pos}")
         if self.popup and self.popup.winfo_viewable():
             self._position_popup()
@@ -2576,20 +2199,14 @@ class WeatherWidget(tk.Tk):
         except Exception:
             pass
 
-        available_width = max(420, right - left - 10)
+        available_width = max(1, right - left - 10)
         popup_width = min(popup_width, available_width)
 
-        available_height = max(260, bottom - top - 10)
+        available_height = max(1, bottom - top - 10)
         popup_height = min(popup_height, available_height)
 
         x_pos = max(left + 5, right - popup_width - 5)
-
-        if bottom < screen_h:
-            y_pos = max(0, bottom - popup_height - 3)
-        elif top > 0:
-            y_pos = top + 3
-        else:
-            y_pos = max(0, bottom - popup_height - 3)
+        y_pos = max(top + 3, bottom - popup_height - 3)
 
         self.popup.geometry(f"{popup_width}x{popup_height}+{x_pos}+{y_pos}")
         self.popup.update_idletasks()
@@ -2653,8 +2270,11 @@ class WeatherWidget(tk.Tk):
 
     def _open_open_meteo_terms(self) -> None:
         try:
-            webbrowser.open_new_tab(OPEN_METEO_TERMS_URL)
+            opened = webbrowser.open_new_tab(OPEN_METEO_TERMS_URL)
         except Exception:
+            self.status_var.set("Open-Meteo-linkin avaaminen epäonnistui.")
+            return
+        if not opened:
             self.status_var.set("Open-Meteo-linkin avaaminen epäonnistui.")
 
     def _resolve_popup_theme_id(self, theme_id: str | None) -> str:
@@ -2703,49 +2323,65 @@ class WeatherWidget(tk.Tk):
         self._set_popup_theme(self._next_popup_theme_id())
 
     def refresh_weather(self, city_override: str | None = None) -> None:
-        if self.fetch_in_progress:
-            return
-
         city = (city_override if city_override is not None else self.city_var.get()).strip()
         if not city:
             messagebox.showinfo(APP_NAME, "Kirjoita paikkakunnan nimi.")
             return
 
+        if self.fetch_in_progress:
+            if city_override is not None:
+                self.pending_city_search = city
+                self.status_var.set(f"Kaupunkihaku odottaa: {city}")
+            return
+
         self.fetch_in_progress = True
         self.status_var.set(f"Haetaan säätä: {city}")
-        worker = threading.Thread(target=self._fetch_worker, args=(city,), daemon=True)
-        worker.start()
+        temperature_unit = self.settings.get("temperature_unit", "celsius")
+        place_hint = self.latest_place if city_override is None else None
+        self._start_background_worker(
+            lambda: self._fetch_worker(city, temperature_unit, place_hint)
+        )
 
-    def _fetch_worker(self, city: str) -> None:
+    def _fetch_worker(self, city: str, temperature_unit: str, place_hint: dict | None) -> None:
         try:
-            place = geocode_city(city)
+            place = place_hint or _request_with_retry(lambda: geocode_city(city))
+            latitude, longitude = _coordinates_from_place(place)
 
-            weather = None
-            for attempt in range(2):
-                try:
-                    weather = get_weather(
-                        place["latitude"],
-                        place["longitude"],
-                        self.settings.get("temperature_unit", "celsius"),
-                    )
-                    break
-                except (URLError, HTTPError, TimeoutError):
-                    if attempt == 1:
-                        raise
-                    time.sleep(1.0)
+            weather = _request_with_retry(
+                lambda: get_weather(
+                    latitude,
+                    longitude,
+                    temperature_unit,
+                )
+            )
+            validate_weather_payload(weather)
 
-            if weather is None:
-                raise RuntimeError("Säädata puuttuu palveluvastauksesta.")
-
-            self._call_on_ui_thread(lambda place=place, weather=weather: self._apply_weather(place, weather))
-        except ValueError as error:
+            self._call_on_ui_thread(
+                lambda place=place, weather=weather, city=city: self._handle_weather_result(
+                    place,
+                    weather,
+                    city,
+                )
+            )
+        except CityNotFoundError as error:
             message = str(error)
             self._call_on_ui_thread(lambda message=message: self._show_error(message, notify_user=True))
-        except (URLError, HTTPError, TimeoutError):
+        except (URLError, TimeoutError):
             self._call_on_ui_thread(lambda: self._show_error("Verkkovirhe. Tarkista internet-yhteys."))
-        except Exception as error:  # noqa: BLE001
-            message = f"Tuntematon virhe: {error}"
+        except WeatherServiceError as error:
+            message = str(error)
             self._call_on_ui_thread(lambda message=message: self._show_error(message))
+        except Exception as error:  # noqa: BLE001
+            message = f"Säätietojen haku epäonnistui: {error}"
+            self._call_on_ui_thread(lambda message=message: self._show_error(message))
+
+    def _handle_weather_result(self, place: dict, weather: dict, requested_city: str) -> None:
+        try:
+            self._apply_weather(place, weather, requested_city)
+        except WeatherServiceError as error:
+            self._show_error(str(error))
+        except Exception:  # noqa: BLE001
+            self._show_error("Säädatan käsittely epäonnistui.")
 
     def _show_error(self, text: str, notify_user: bool = False) -> None:
         self.fetch_in_progress = False
@@ -2753,8 +2389,8 @@ class WeatherWidget(tk.Tk):
         # Keep the last successful weather symbol in tray after transient fetch errors.
         # Show the bullet only when we do not have any weather data yet.
         if self.latest_weather:
-            current = self.latest_weather.get("current", {})
-            style = resolve_weather_style(current.get("weather_code"), current.get("is_day", 1) == 1)
+            current = _as_dict(self.latest_weather.get("current"))
+            style = resolve_weather_style(current.get("weather_code"), _is_daytime(current.get("is_day")))
             city_text = format_city(self.latest_place) if isinstance(self.latest_place, dict) else self.city_var.get()
             current_temp = format_temperature(current.get("temperature_2m"), self.unit_symbol)
             self._update_tray_symbol(style.icon_key, f"{city_text}: {current_temp} (päivitys epäonnistui)")
@@ -2763,11 +2399,26 @@ class WeatherWidget(tk.Tk):
         if notify_user or not self.latest_weather:
             messagebox.showerror(APP_NAME, text)
         self._schedule_refresh()
+        self._run_pending_city_search()
+
+    def _run_pending_city_search(self) -> None:
+        city = self.pending_city_search
+        if not city or self._is_destroying:
+            return
+        self.pending_city_search = None
+        self.after_idle(lambda city=city: self.refresh_weather(city))
 
     def _schedule_refresh(self) -> None:
         if self.refresh_job is not None:
-            self.after_cancel(self.refresh_job)
-        self.refresh_job = self.after(REFRESH_INTERVAL_MS, self.refresh_weather)
+            try:
+                self.after_cancel(self.refresh_job)
+            except tk.TclError:
+                pass
+        self.refresh_job = self.after(REFRESH_INTERVAL_MS, self._run_scheduled_refresh)
+
+    def _run_scheduled_refresh(self) -> None:
+        self.refresh_job = None
+        self.refresh_weather()
 
     def _apply_current_weather_summary(
         self,
@@ -2793,8 +2444,6 @@ class WeatherWidget(tk.Tk):
             style.icon_key,
             HERO_ICON_WIDTH,
             HERO_ICON_HEIGHT,
-            style.icon,
-            style.accent,
         )
         self.popup_bg_canvas.itemconfigure(self.hero_temp_label, text=current_temp)
         self.popup_bg_canvas.itemconfigure(self.hero_city_label, text=city_text)
@@ -2815,43 +2464,23 @@ class WeatherWidget(tk.Tk):
         self.popup_bg_canvas.itemconfigure(self.today_rain_prob_value_label, text=rain_probability)
         self.popup_bg_canvas.itemconfigure(self.today_humidity_value_label, text=humidity)
         self.popup_bg_canvas.itemconfigure(self.today_wind_value_label, text=wind)
-        if self.rain_mm_umbrella_icon_photo is None:
-            self.popup_bg_canvas.itemconfigure(self.today_rain_mm_icon_label, text="☂", fill="#F2F6FF")
-        else:
-            self.popup_bg_canvas.itemconfigure(self.today_rain_mm_icon_label, image=self.rain_mm_umbrella_icon_photo)
-        if self.rain_prob_drop_icon_photo is None:
-            self.popup_bg_canvas.itemconfigure(self.today_rain_prob_icon_label, text="💧", fill="#8CC7FF")
-        else:
-            self.popup_bg_canvas.itemconfigure(self.today_rain_prob_icon_label, image=self.rain_prob_drop_icon_photo)
-        if self.wind_swirl_icon_photo is None:
-            self.popup_bg_canvas.itemconfigure(self.today_wind_icon_label, text="🌬", fill="#F2F6FF")
-        else:
-            self.popup_bg_canvas.itemconfigure(self.today_wind_icon_label, image=self.wind_swirl_icon_photo)
-
-        stats_right = self.popup_bg_canvas.coords(self.today_condition_label)
-        right_x = int(stats_right[0]) if stats_right else (self.popup.winfo_width() - (POPUP_CONTENT_PAD + 22))
-        stats_top = self.popup_bg_canvas.coords(self.today_rain_mm_value_label)
-        top_y = int(stats_top[1]) if stats_top else 61
-        self._layout_today_stats(right_x, top_y)
-
         self.popup_bg_canvas.itemconfigure(self.today_condition_label, text=condition_label)
         self.popup_bg_canvas.itemconfigure(self.today_hilo_label, text=high_low_text)
-        if self.sunrise_sun_icon_photo is None:
-            self.popup_bg_canvas.itemconfigure(self.today_sun_icon_label, text="☀️", fill=ACCENT_GOLD)
-        else:
-            self.popup_bg_canvas.itemconfigure(self.today_sun_icon_label, image=self.sunrise_sun_icon_photo)
         self.popup_bg_canvas.itemconfigure(self.today_sunrise_time_label, text=sunrise)
-        if self.sunset_moon_icon_photo is None:
-            self.popup_bg_canvas.itemconfigure(self.today_moon_icon_label, text="🌙", fill=ACCENT_GOLD)
-        else:
-            self.popup_bg_canvas.itemconfigure(self.today_moon_icon_label, image=self.sunset_moon_icon_photo)
         self.popup_bg_canvas.itemconfigure(self.today_sunset_time_label, text=sunset)
 
+        condition_coords = self.popup_bg_canvas.coords(self.today_condition_label)
+        if condition_coords:
+            right_text = int(condition_coords[0]) + 4
+            right_stack_top = int(condition_coords[1]) - 2
+            self._layout_today_weather_stack(right_text, right_stack_top)
+
     def _apply_forecast_cards(self, daily: dict) -> None:
-        dates = daily.get("time", [])
-        code_list = daily.get("weather_code", [])
-        t_min = daily.get("temperature_2m_min", [])
-        t_max = daily.get("temperature_2m_max", [])
+        daily_data = _as_dict(daily)
+        dates = _as_list(daily_data.get("time"))
+        code_list = _as_list(daily_data.get("weather_code"))
+        t_min = _as_list(daily_data.get("temperature_2m_min"))
+        t_max = _as_list(daily_data.get("temperature_2m_max"))
 
         for index, card in enumerate(self.forecast_cards):
             data_index = index + 1
@@ -2863,19 +2492,20 @@ class WeatherWidget(tk.Tk):
                     "unknown",
                     FORECAST_ICON_WIDTH,
                     FORECAST_ICON_HEIGHT,
-                    "•",
-                    TEXT_MUTED,
                 )
                 self.popup_bg_canvas.itemconfigure(card["temp"], text="--° / --°")
                 continue
 
-            forecast_style = resolve_weather_style(code_list[data_index] if data_index < len(code_list) else None, True)
+            forecast_style = resolve_weather_style(
+                code_list[data_index] if data_index < len(code_list) else None,
+                True,
+            )
             high = format_temperature(t_max[data_index] if data_index < len(t_max) else None, self.unit_symbol)
             low = format_temperature(t_min[data_index] if data_index < len(t_min) else None, self.unit_symbol)
             try:
                 day_index = datetime.strptime(dates[data_index], "%Y-%m-%d").weekday()
                 day_label = WEEKDAY_SHORT_FI.get(day_index, "-")
-            except ValueError:
+            except (TypeError, ValueError):
                 day_label = "-"
 
             self.popup_bg_canvas.itemconfigure(card["day"], text=day_label)
@@ -2885,63 +2515,71 @@ class WeatherWidget(tk.Tk):
                 forecast_style.icon_key,
                 FORECAST_ICON_WIDTH,
                 FORECAST_ICON_HEIGHT,
-                forecast_style.icon,
-                forecast_style.accent,
             )
             self.popup_bg_canvas.itemconfigure(card["temp"], text=f"{high} / {low}")
 
-    def _apply_weather(self, place: dict, weather: dict) -> None:
-        self.fetch_in_progress = False
-        self.latest_place = place
-        self.latest_weather = weather
-        resolved_city = place.get("name", self.city_var.get())
-        self.city_var.set(resolved_city)
-        if self.settings.get("city") != resolved_city:
-            self.settings["city"] = resolved_city
-            save_settings(self.settings)
+    def _apply_weather(self, place: dict, weather: dict, requested_city: str) -> None:
+        validate_weather_payload(weather)
+        place_data = _as_dict(place)
+        weather_data = _as_dict(weather)
+        current = _as_dict(weather_data.get("current"))
+        daily = _as_dict(weather_data.get("daily"))
+        current_units = _as_dict(weather_data.get("current_units"))
+        daily_units = _as_dict(weather_data.get("daily_units"))
 
-        current = weather.get("current", {})
-        daily = weather.get("daily", {})
-        current_units = weather.get("current_units", {})
-        daily_units = weather.get("daily_units", {})
-
-        unit_symbol = current_units.get("temperature_2m", f"°{self.unit_symbol}").replace("°", "")
+        unit_text = _clean_text(current_units.get("temperature_2m")) or f"°{self.unit_symbol}"
+        unit_symbol = unit_text.replace("°", "")
         self.unit_symbol = unit_symbol or self.unit_symbol
 
-        style = resolve_weather_style(current.get("weather_code"), current.get("is_day", 1) == 1)
+        style = resolve_weather_style(current.get("weather_code"), _is_daytime(current.get("is_day")))
         refreshed_at = datetime.now()
-        self.last_weather_update = refreshed_at
         now_text = refreshed_at.strftime("%H:%M")
         current_temp = format_temperature(current.get("temperature_2m"), self.unit_symbol)
-        city_text = format_city(place)
+        city_text = format_city(place_data)
 
-        dates = daily.get("time", [])
-        code_list = daily.get("weather_code", [])
-        t_min = daily.get("temperature_2m_min", [])
-        t_max = daily.get("temperature_2m_max", [])
-        daily_rain_prob = daily.get("precipitation_probability_max", [])
-        rain_sum = daily.get("precipitation_sum", [])
-        sunrise_list = daily.get("sunrise", [])
-        sunset_list = daily.get("sunset", [])
+        t_min = _as_list(daily.get("temperature_2m_min"))
+        t_max = _as_list(daily.get("temperature_2m_max"))
+        daily_rain_prob = _as_list(daily.get("precipitation_probability_max"))
+        rain_sum = _as_list(daily.get("precipitation_sum"))
+        sunrise_list = _as_list(daily.get("sunrise"))
+        sunset_list = _as_list(daily.get("sunset"))
 
-        rain_mm_unit = daily_units.get("precipitation_sum", "mm")
-        today_high = format_temperature(t_max[0] if t_max else None, self.unit_symbol)
-        today_low = format_temperature(t_min[0] if t_min else None, self.unit_symbol)
+        rain_mm_unit = _clean_text(daily_units.get("precipitation_sum")) or "mm"
+        today_high = format_temperature(_sequence_item(t_max), self.unit_symbol)
+        today_low = format_temperature(_sequence_item(t_min), self.unit_symbol)
         humidity_pct = format_metric(current.get("relative_humidity_2m"), "%")
-        next_hours_rain_prob = max_precipitation_probability_next_hours(weather)
+        next_hours_rain_prob = max_precipitation_probability_next_hours(weather_data)
         if next_hours_rain_prob is not None:
             today_rain_prob = f"{next_hours_rain_prob}%"
-        elif daily_rain_prob:
-            today_rain_prob = f"{daily_rain_prob[0]}%"
         else:
-            today_rain_prob = "-"
-        today_rain_mm = format_metric(rain_sum[0] if rain_sum else None, f" {rain_mm_unit}", decimals=1)
+            today_rain_prob = format_metric(_sequence_item(daily_rain_prob), "%")
+        today_rain_mm = format_metric(_sequence_item(rain_sum), f" {rain_mm_unit}", decimals=1)
         wind_speed_ms = format_metric(current.get("wind_speed_10m"), " m/s", decimals=1)
         wind_direction = format_wind_direction(current.get("wind_direction_10m"))
-        today_sunrise = format_time_short(sunrise_list[0] if sunrise_list else None)
-        today_sunset = format_time_short(sunset_list[0] if sunset_list else None)
+        today_sunrise = format_time_short(_sequence_item(sunrise_list))
+        today_sunset = format_time_short(_sequence_item(sunset_list))
 
-        wind_text = f"{wind_speed_ms} ({wind_direction})"
+        if wind_speed_ms == "-":
+            wind_text = "-"
+        elif wind_direction == "-":
+            wind_text = wind_speed_ms
+        else:
+            wind_text = f"{wind_speed_ms} ({wind_direction})"
+
+        requested_city_text = _clean_text(requested_city)
+        place_name = _clean_text(place_data.get("name"))
+        if requested_city_text and place_name and requested_city_text.casefold() == place_name.casefold():
+            normalized_city = place_name
+        else:
+            normalized_city = requested_city_text or place_name or DEFAULT_CITY
+        self.latest_place = place_data
+        self.latest_weather = weather_data
+        self.last_weather_update = refreshed_at
+        self.city_var.set(normalized_city)
+        if self.settings.get("city") != normalized_city:
+            self.settings["city"] = normalized_city
+            save_settings(self.settings)
+
         self._apply_current_weather_summary(style, current_temp, city_text, f"Päivitetty {now_text}")
         self._apply_today_detail_metrics(
             condition_label=style.label,
@@ -2956,13 +2594,16 @@ class WeatherWidget(tk.Tk):
 
         self.status_var.set("")
         self._update_tray_symbol(style.icon_key, f"{city_text}: {current_temp} {style.label}")
-        self.detail_city_var.set(place.get("name", self.city_var.get()))
+        self.detail_city_var.set(normalized_city)
         self.startup_var.set(is_startup_enabled())
 
         self._apply_forecast_cards(daily)
 
         self.popup_bg_canvas.itemconfigure(self.footer_label, text="Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot")
+        self.fetch_in_progress = False
         self._schedule_refresh()
+        self._run_pending_city_search()
+
 
 if __name__ == "__main__":
     app = WeatherWidget()

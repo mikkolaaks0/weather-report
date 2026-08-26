@@ -14,7 +14,7 @@ if ($env:OS -ne 'Windows_NT') {
 
 $repo = 'mikkolaaks0/weather-report'
 $apiUrl = "https://api.github.com/repos/$repo/releases/latest"
-$downloadDir = Join-Path $env:TEMP 'WeatherReportInstall'
+$downloadDir = Join-Path ([System.IO.Path]::GetTempPath()) ("WeatherReportInstall-$([guid]::NewGuid().ToString('N'))")
 $appName = 'Weather Report'
 $exeName = 'WeatherReport.exe'
 
@@ -157,6 +157,7 @@ Write-Host "Installing $appName..."
 
 New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
 Assert-SafeInstallDirectory -Path $InstallDir
+$InstallDir = Normalize-PathForSafety $InstallDir
 $release = Get-LatestRelease
 $asset = Get-PortableAsset -Release $release
 $zipPath = Join-Path $downloadDir $asset.name
@@ -165,26 +166,55 @@ Write-Host "Downloading $($asset.name)..."
 Invoke-Download -Uri $asset.browser_download_url -OutFile $zipPath
 Test-AssetChecksum -Release $release -AssetName $asset.name -AssetPath $zipPath
 
-Get-Process -Name 'WeatherReport' -ErrorAction SilentlyContinue | Stop-Process -Force
-
-if (Test-Path -LiteralPath $InstallDir) {
-    Remove-Item -LiteralPath $InstallDir -Recurse -Force
-}
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-
-Write-Host "Extracting to $InstallDir..."
-Expand-Archive -Path $zipPath -DestinationPath $InstallDir -Force
-
-$exePath = Get-ChildItem -Path $InstallDir -Filter $exeName -Recurse |
+$extractDir = Join-Path $downloadDir 'extracted'
+Write-Host 'Validating package contents...'
+Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+$stagedExePath = Get-ChildItem -Path $extractDir -Filter $exeName -Recurse |
     Select-Object -First 1 -ExpandProperty FullName
-
-if (-not $exePath) {
-    throw "$exeName was not found after extracting the package."
+if (-not $stagedExePath) {
+    throw "$exeName was not found in the downloaded package."
 }
+$stagedAppDir = Split-Path -Parent $stagedExePath
+
+Get-Process -Name 'WeatherReport' -ErrorAction SilentlyContinue | Stop-Process -Force
+Write-Host "Extracting to $InstallDir..."
+$installParent = Split-Path -Parent $InstallDir
+New-Item -ItemType Directory -Force -Path $installParent | Out-Null
+$backupDir = "$InstallDir.backup-$([guid]::NewGuid().ToString('N'))"
+$hadExistingInstall = Test-Path -LiteralPath $InstallDir
+if ($hadExistingInstall) {
+    Move-Item -LiteralPath $InstallDir -Destination $backupDir
+}
+
+try {
+    Move-Item -LiteralPath $stagedAppDir -Destination $InstallDir
+}
+catch {
+    if (Test-Path -LiteralPath $InstallDir) {
+        Remove-Item -LiteralPath $InstallDir -Recurse -Force
+    }
+    if ($hadExistingInstall -and (Test-Path -LiteralPath $backupDir)) {
+        Move-Item -LiteralPath $backupDir -Destination $InstallDir
+    }
+    throw
+}
+
+if (Test-Path -LiteralPath $backupDir) {
+    try {
+        Remove-Item -LiteralPath $backupDir -Recurse -Force
+    }
+    catch {
+        Write-Warning "The previous installation backup could not be removed: $backupDir"
+    }
+}
+$exePath = Join-Path $InstallDir $exeName
 
 $appDir = Split-Path -Parent $exePath
-$iconPath = Join-Path $appDir 'assets\app.ico'
-if (-not (Test-Path $iconPath)) {
+$iconPath = @(
+    (Join-Path $appDir 'assets\app.ico'),
+    (Join-Path $appDir '_internal\assets\app.ico')
+) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $iconPath) {
     $iconPath = $exePath
 }
 
@@ -208,8 +238,12 @@ if (-not $NoDesktopShortcut) {
 
 if ($Startup) {
     $startup = [Environment]::GetFolderPath('Startup')
+    $legacyStartupShortcut = Join-Path $startup "$appName.lnk"
+    if (Test-Path -LiteralPath $legacyStartupShortcut) {
+        Remove-Item -LiteralPath $legacyStartupShortcut -Force
+    }
     New-Shortcut `
-        -Path (Join-Path $startup "$appName.lnk") `
+        -Path (Join-Path $startup 'weather-report.lnk') `
         -Target $exePath `
         -WorkingDirectory $appDir `
         -Icon $iconPath
@@ -217,6 +251,21 @@ if ($Startup) {
 
 if (-not $NoLaunch) {
     Start-Process -FilePath $exePath -WorkingDirectory $appDir
+}
+
+$normalizedDownloadDir = Normalize-PathForSafety $downloadDir
+$normalizedTempDir = Normalize-PathForSafety ([System.IO.Path]::GetTempPath())
+$downloadPrefix = "$normalizedTempDir\WeatherReportInstall-"
+if (
+    $normalizedDownloadDir.StartsWith($downloadPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+    (Test-Path -LiteralPath $normalizedDownloadDir)
+) {
+    try {
+        Remove-Item -LiteralPath $normalizedDownloadDir -Recurse -Force
+    }
+    catch {
+        Write-Warning "Temporary installer files could not be removed: $normalizedDownloadDir"
+    }
 }
 
 Write-Host "$appName installed successfully."

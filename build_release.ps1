@@ -1,5 +1,6 @@
 param(
-    [switch]$SkipInstaller
+    [switch]$SkipInstaller,
+    [string]$Version = '0.1.1'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,7 +15,13 @@ function Resolve-PythonCommand {
     foreach ($candidate in $candidates) {
         $commandInfo = Get-Command $candidate.Command -ErrorAction SilentlyContinue
         if ($commandInfo) {
-            return $candidate
+            & $candidate.Command @($candidate.Args + @(
+                '-c',
+                'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'
+            ))
+            if ($LASTEXITCODE -eq 0) {
+                return $candidate
+            }
         }
     }
 
@@ -52,40 +59,71 @@ function Ensure-Tool {
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
+$normalizedVersion = $Version.TrimStart('v')
+if ($normalizedVersion -notmatch '^\d+\.\d+\.\d+$') {
+    throw "Version must use semantic format like 0.1.1 or v0.1.1. Got: $Version"
+}
+
 $python = Resolve-PythonCommand
 Invoke-Python -Python $python -Arguments @('-m', 'pip', 'install', '-r', 'requirements.txt')
-Ensure-Tool -Python $python -ModuleName 'PyInstaller' -PackageName 'pyinstaller'
 
+Write-Host 'Running tests...'
+Invoke-Python -Python $python -Arguments @('-m', 'unittest', 'discover', '-s', 'tests', '-v')
+
+Ensure-Tool -Python $python -ModuleName 'PyInstaller' -PackageName 'pyinstaller'
 Write-Host 'Building portable executable...'
-Invoke-Python -Python $python -Arguments @('-m', 'PyInstaller', '--noconfirm', 'WeatherReport.spec')
+Invoke-Python -Python $python -Arguments @('-m', 'PyInstaller', '--noconfirm', '--clean', 'WeatherReport.spec')
 
 $distDir = Join-Path $root 'dist\WeatherReport'
+$distExe = Join-Path $distDir 'WeatherReport.exe'
+$requiredBuildPaths = @(
+    $distExe,
+    (Join-Path $distDir '_internal\assets\weather-icons\unknown.png'),
+    (Join-Path $distDir '_internal\assets\metric-icons\wind.png'),
+    (Join-Path $distDir '_internal\assets\fonts\Exo2-Regular.ttf')
+)
+foreach ($requiredPath in $requiredBuildPaths) {
+    if (-not (Test-Path $requiredPath)) {
+        throw "Portable build is missing a required file: $requiredPath"
+    }
+}
 $releaseDir = Join-Path $root 'release'
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 
 $zipPath = Join-Path $releaseDir 'WeatherReport-portable.zip'
+$installerPath = Join-Path $releaseDir 'WeatherReport-Setup.exe'
 if (Test-Path $zipPath) {
     Remove-Item $zipPath -Force
 }
+if (Test-Path $installerPath) {
+    Remove-Item $installerPath -Force
+}
 Compress-Archive -Path (Join-Path $distDir '*') -DestinationPath $zipPath
 Write-Host "Portable package ready: $zipPath"
+$releaseArtifacts = @($zipPath)
 
 $iscc = Get-Command iscc -ErrorAction SilentlyContinue
 if (-not $SkipInstaller -and $iscc) {
     Write-Host 'Building installer...'
-    & $iscc.Source (Join-Path $root 'installer.iss')
+    & $iscc.Source "/DAppVersion=$normalizedVersion" (Join-Path $root 'installer.iss')
+    if ($LASTEXITCODE -ne 0) {
+        throw "Inno Setup build failed with exit code $LASTEXITCODE."
+    }
+    if (-not (Test-Path $installerPath)) {
+        throw "Installer build completed without the expected artifact: $installerPath"
+    }
+    $releaseArtifacts += $installerPath
 }
 elseif (-not $SkipInstaller) {
     Write-Host 'Inno Setup was not found. The portable package was built, but the installer was skipped.'
 }
 
 $checksumPath = Join-Path $releaseDir 'SHA256SUMS.txt'
-Get-ChildItem -Path $releaseDir -File |
-    Where-Object { $_.Name -ne 'SHA256SUMS.txt' } |
-    Sort-Object Name |
+$releaseArtifacts |
+    Sort-Object { Split-Path -Leaf $_ } |
     ForEach-Object {
-        $hash = Get-FileHash -Algorithm SHA256 -Path $_.FullName
-        "$($hash.Hash.ToLowerInvariant())  $($_.Name)"
+        $hash = Get-FileHash -Algorithm SHA256 -Path $_
+        "$($hash.Hash.ToLowerInvariant())  $(Split-Path -Leaf $_)"
     } |
     Set-Content -Path $checksumPath -Encoding ascii
 
