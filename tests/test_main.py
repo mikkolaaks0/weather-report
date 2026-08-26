@@ -406,6 +406,33 @@ class TrayMenuTests(unittest.TestCase):
 
 
 class UpdateSafetyTests(unittest.TestCase):
+    def test_update_status_fetches_origin_main_and_reports_fast_forward(self) -> None:
+        with (
+            patch.object(
+                main,
+                "_git_output",
+                side_effect=["true", "main", "", "", "local-sha", "remote-sha"],
+            ) as git_output,
+            patch.object(main, "_run_git_command") as run_git,
+        ):
+            run_git.return_value.returncode = 0
+            status = main.check_github_update_status()
+
+        self.assertEqual(status["state"], "available")
+        self.assertEqual(status["local"], "local-sha")
+        self.assertEqual(status["remote"], "remote-sha")
+        self.assertEqual(git_output.call_args_list[3].args[0], ["fetch", "origin", "main"])
+        self.assertEqual(
+            run_git.call_args.args[0],
+            ["merge-base", "--is-ancestor", "HEAD", "origin/main"],
+        )
+
+    def test_packaged_update_path_is_not_mistaken_for_git_update(self) -> None:
+        with patch.object(main, "IS_FROZEN", True):
+            status = main.check_github_update_status()
+
+        self.assertEqual(status["state"], "unsupported")
+
     def test_apply_update_rechecks_worktree_before_pull(self) -> None:
         with (
             patch.object(main, "_git_output", side_effect=[main.UPDATE_BRANCH, " M main.py"]),

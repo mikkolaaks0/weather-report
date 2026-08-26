@@ -160,9 +160,19 @@ User settings are stored under:
 ## Updates
 
 When running from a Git checkout on the `main` branch, the app can check
-`origin/main` for updates. It only applies fast-forward updates, asks before
-updating, and restarts itself after a successful update. Other branches skip the
-automatic update path to avoid pulling `main` into local development work.
+`origin/main` for updates. The current `origin` remote is
+`https://github.com/mikkolaaks0/weather-report.git`. The tray action first
+fetches `origin/main`, only applies a fast-forward update to a clean checkout,
+asks before updating, and restarts itself after a successful update. Other
+branches skip the automatic update path to avoid pulling `main` into local
+development work.
+
+The packaged `WeatherReport.exe` does not update itself with Git. Install the
+latest packaged version with `install.ps1`; it queries
+`https://api.github.com/repos/mikkolaaks0/weather-report/releases/latest`,
+downloads `WeatherReport-portable*.zip`, verifies `SHA256SUMS.txt` when
+available, and replaces the installed package. The app's tray update action is
+therefore available only when running from a Git checkout.
 
 For public distribution, prefer GitHub Releases with a signed or checksummed
 installer/portable package.
