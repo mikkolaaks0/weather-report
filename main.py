@@ -42,6 +42,8 @@ WINDOWS_TASKBAR_SETTINGS_URI = "ms-settings:taskbar"
 REFRESH_INTERVAL_MS = 30 * 60 * 1000
 FRESH_WEATHER_MAX_AGE_MINUTES = 15
 UPDATE_CHECK_DELAY_MS = 10 * 1000
+MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_CITY_QUERY_LENGTH = 120
 DEFAULT_CITY = "Helsinki"
 VALID_TEMPERATURE_UNITS = {"celsius", "fahrenheit"}
 FORECAST_DAYS = 7
@@ -57,13 +59,11 @@ APP_WORKING_DIR = APP_EXECUTABLE_PATH.parent if IS_FROZEN else PROJECT_DIR
 
 
 def _resolve_settings_dir() -> Path:
-    appdata = os.environ.get("APPDATA")
-    if not appdata:
+    settings_root = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+    if not settings_root:
         return APP_WORKING_DIR
 
-    appdata_path = Path(appdata)
-    primary_dir = appdata_path / APP_SLUG
-    return primary_dir
+    return Path(settings_root) / APP_SLUG
 
 
 _settings_dir = _resolve_settings_dir()
@@ -518,6 +518,10 @@ def format_clock_fi(value: datetime) -> str:
     return f"{day_short} {value:%d.%m.%Y %H:%M:%S}"
 
 
+def _normalize_city_query(value: object) -> str:
+    return " ".join(value.split()) if isinstance(value, str) else ""
+
+
 def load_settings() -> dict:
     settings = {
         "city": DEFAULT_CITY,
@@ -537,9 +541,9 @@ def load_settings() -> dict:
     if not isinstance(saved, dict):
         return settings
 
-    city = saved.get("city")
-    if isinstance(city, str) and city.strip():
-        settings["city"] = city.strip()
+    city = _normalize_city_query(saved.get("city"))
+    if city and len(city) <= MAX_CITY_QUERY_LENGTH:
+        settings["city"] = city
 
     temperature_unit = saved.get("temperature_unit")
     if isinstance(temperature_unit, str):
@@ -583,8 +587,11 @@ def _get_json(url: str, params: dict) -> dict:
         },
     )
     with urlopen(request, timeout=12) as response:
-        raw_payload = response.read()
+        raw_payload = response.read(MAX_JSON_RESPONSE_BYTES + 1)
         charset = response.headers.get_content_charset() or "utf-8"
+
+    if len(raw_payload) > MAX_JSON_RESPONSE_BYTES:
+        raise WeatherServiceError("Sääpalvelun vastaus oli liian suuri.")
 
     try:
         payload = json.loads(raw_payload.decode(charset))
@@ -597,10 +604,18 @@ def _get_json(url: str, params: dict) -> dict:
 
 
 def geocode_city(city_name: str) -> dict:
+    normalized_city = _normalize_city_query(city_name)
+    if not normalized_city:
+        raise CityNotFoundError("Paikkakunnan nimi puuttuu.")
+    if len(normalized_city) > MAX_CITY_QUERY_LENGTH:
+        raise WeatherServiceError(
+            f"Paikkakunnan nimi saa olla enintään {MAX_CITY_QUERY_LENGTH} merkkiä."
+        )
+
     payload = _get_json(
         GEOCODING_URL,
         {
-            "name": city_name,
+            "name": normalized_city,
             "count": 1,
             "language": "fi",
             "format": "json",
@@ -621,12 +636,16 @@ def geocode_city(city_name: str) -> dict:
 
 
 def get_weather(latitude: float, longitude: float, temperature_unit: str = "celsius") -> dict:
+    normalized_unit = temperature_unit.strip().lower() if isinstance(temperature_unit, str) else ""
+    if normalized_unit not in VALID_TEMPERATURE_UNITS:
+        normalized_unit = "celsius"
+
     return _get_json(
         FORECAST_URL,
         {
             "latitude": latitude,
             "longitude": longitude,
-            "temperature_unit": temperature_unit,
+            "temperature_unit": normalized_unit,
             "current": ",".join(
                 [
                     "temperature_2m",
@@ -902,7 +921,30 @@ def format_city(place: object) -> str:
     return f"{city}, {region}" if region else city
 
 
+def _get_windows_user_shell_folder(value_name: str) -> Path | None:
+    if os.name != "nt":
+        return None
+
+    try:
+        import winreg
+
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            folder_value, _value_type = winreg.QueryValueEx(key, value_name)
+    except (ImportError, OSError):
+        return None
+
+    if not isinstance(folder_value, str) or not folder_value.strip():
+        return None
+    folder_path = Path(os.path.expandvars(folder_value.strip()))
+    return folder_path if folder_path.is_absolute() else None
+
+
 def get_startup_shortcut_path(name: str = STARTUP_SHORTCUT_NAME) -> Path:
+    startup_dir = _get_windows_user_shell_folder("Startup")
+    if startup_dir is not None:
+        return startup_dir / name
+
     appdata = os.environ.get("APPDATA")
     if not appdata:
         raise OSError("APPDATA-ympäristömuuttuja puuttuu.")
@@ -911,6 +953,10 @@ def get_startup_shortcut_path(name: str = STARTUP_SHORTCUT_NAME) -> Path:
 
 
 def get_desktop_shortcut_path(name: str = DESKTOP_SHORTCUT_NAME) -> Path:
+    desktop_dir = _get_windows_user_shell_folder("Desktop")
+    if desktop_dir is not None:
+        return desktop_dir / name
+
     userprofile = os.environ.get("USERPROFILE")
     if not userprofile:
         raise OSError("USERPROFILE-ympäristömuuttuja puuttuu.")
@@ -919,47 +965,19 @@ def get_desktop_shortcut_path(name: str = DESKTOP_SHORTCUT_NAME) -> Path:
 
 def get_startup_shortcut_paths() -> list[Path]:
     primary = get_startup_shortcut_path()
-    legacy_paths = [get_startup_shortcut_path(name) for name in LEGACY_STARTUP_SHORTCUT_NAMES]
+    legacy_paths = [primary.with_name(name) for name in LEGACY_STARTUP_SHORTCUT_NAMES]
     return list(dict.fromkeys([primary, *legacy_paths]))
 
 
 def is_startup_enabled() -> bool:
     try:
-        return any(path.exists() for path in get_startup_shortcut_paths())
+        return any(path.is_file() for path in get_startup_shortcut_paths())
     except OSError:
         return False
 
 
 def _ps_escape(text: str) -> str:
     return text.replace("'", "''")
-
-
-def _resolve_pythonw_executable() -> Path | None:
-    current_python = Path(sys.executable).resolve()
-    sibling_pythonw = current_python.with_name("pythonw.exe")
-    if sibling_pythonw.is_file():
-        return sibling_pythonw
-
-    candidate = shutil.which("pythonw")
-    if candidate:
-        candidate_path = Path(candidate)
-        if candidate_path.is_file():
-            return candidate_path
-
-    local_appdata = os.environ.get("LOCALAPPDATA")
-    if local_appdata:
-        python_root = Path(local_appdata) / "Programs" / "Python"
-
-        def version_key(path: Path) -> int:
-            suffix = path.name.removeprefix("Python")
-            return int(suffix) if suffix.isdigit() else -1
-
-        for install_dir in sorted(python_root.glob("Python*"), key=version_key, reverse=True):
-            path = install_dir / "pythonw.exe"
-            if path.is_file():
-                return path
-
-    return None
 
 
 def _hidden_subprocess_kwargs() -> dict:
@@ -975,6 +993,75 @@ def _hidden_subprocess_kwargs() -> dict:
     }
 
 
+def _is_supported_pythonw(path: Path) -> bool:
+    if not path.is_file():
+        return False
+
+    try:
+        result = subprocess.run(
+            [
+                str(path),
+                "-c",
+                "import sys; raise SystemExit(sys.version_info < (3, 10))",
+            ],
+            check=False,
+            timeout=5,
+            **_hidden_subprocess_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _resolve_pythonw_executable() -> Path | None:
+    current_python = Path(sys.executable).resolve()
+    sibling_pythonw = current_python.with_name("pythonw.exe")
+    if sibling_pythonw.is_file():
+        return sibling_pythonw
+
+    candidate = shutil.which("pythonw")
+    if candidate:
+        candidate_path = Path(candidate)
+        if _is_supported_pythonw(candidate_path):
+            return candidate_path
+
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        python_root = Path(local_appdata) / "Programs" / "Python"
+
+        def version_key(path: Path) -> tuple[int, int]:
+            suffix = path.name.removeprefix("Python")
+            if not suffix.isdigit() or len(suffix) < 2:
+                return (-1, -1)
+            return (int(suffix[0]), int(suffix[1:]))
+
+        for install_dir in sorted(python_root.glob("Python*"), key=version_key, reverse=True):
+            if version_key(install_dir) < (3, 10):
+                continue
+            path = install_dir / "pythonw.exe"
+            if _is_supported_pythonw(path):
+                return path
+
+    return None
+
+
+def _resolve_wscript_executable() -> Path | None:
+    if os.name != "nt":
+        return None
+
+    windows_root = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
+    if windows_root:
+        system_wscript = Path(windows_root) / "System32" / "wscript.exe"
+        if system_wscript.is_file():
+            return system_wscript
+
+    candidate = shutil.which("wscript.exe") or shutil.which("wscript")
+    if not candidate:
+        return None
+    candidate_path = Path(candidate)
+    return candidate_path if candidate_path.is_file() else None
+
+
 def _resolve_shortcut_target() -> tuple[str, str, str, str]:
     if IS_FROZEN:
         target_path = str(APP_EXECUTABLE_PATH)
@@ -982,14 +1069,23 @@ def _resolve_shortcut_target() -> tuple[str, str, str, str]:
         working_dir = str(APP_EXECUTABLE_PATH.parent)
         icon_source = APP_ICON_PATH if APP_ICON_PATH.exists() else APP_EXECUTABLE_PATH
     else:
-        pythonw_path = _resolve_pythonw_executable()
-        if pythonw_path is None:
-            raise FileNotFoundError("pythonw.exe ei löytynyt. Asenna Python Windowsille.")
-
-        target_path = str(pythonw_path)
-        arguments = subprocess.list2cmdline([str((PROJECT_DIR / "main.py").resolve())])
+        launcher_path = (PROJECT_DIR / "start_weather_app.vbs").resolve()
+        wscript_path = _resolve_wscript_executable() if launcher_path.is_file() else None
+        if wscript_path is not None:
+            target_path = str(wscript_path)
+            arguments = subprocess.list2cmdline([str(launcher_path)])
+            icon_fallback = wscript_path
+        else:
+            pythonw_path = _resolve_pythonw_executable()
+            if pythonw_path is None:
+                raise FileNotFoundError(
+                    "Sopivaa Windows-käynnistintä ei löytynyt. Asenna Python 3.10 tai uudempi."
+                )
+            target_path = str(pythonw_path)
+            arguments = subprocess.list2cmdline([str((PROJECT_DIR / "main.py").resolve())])
+            icon_fallback = pythonw_path
         working_dir = str(PROJECT_DIR)
-        icon_source = APP_ICON_PATH if APP_ICON_PATH.exists() else pythonw_path
+        icon_source = APP_ICON_PATH if APP_ICON_PATH.exists() else icon_fallback
 
     return target_path, arguments, working_dir, str(icon_source)
 
@@ -1018,7 +1114,7 @@ def create_windows_shortcut(shortcut_path: Path) -> None:
     )
     try:
         subprocess.run(
-            [shell_path, "-NoProfile", "-Command", script],
+            [shell_path, "-NoProfile", "-NonInteractive", "-Command", script],
             check=True,
             capture_output=True,
             text=True,
@@ -1063,6 +1159,7 @@ def _run_git_command(args: list[str], timeout: int = 30) -> subprocess.Completed
         [git_path, "-C", str(PROJECT_DIR), *args],
         check=False,
         capture_output=True,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
         text=True,
         timeout=timeout,
         **_hidden_subprocess_kwargs(),
@@ -1070,7 +1167,10 @@ def _run_git_command(args: list[str], timeout: int = 30) -> subprocess.Completed
 
 
 def _git_output(args: list[str], timeout: int = 30) -> str:
-    result = _run_git_command(args, timeout=timeout)
+    try:
+        result = _run_git_command(args, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"Git-komento aikakatkaistiin: git {' '.join(args)}") from error
     if result.returncode != 0:
         details = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(details or f"git {' '.join(args)} epäonnistui.")
@@ -1081,8 +1181,17 @@ def check_github_update_status() -> dict:
     if IS_FROZEN:
         return {"state": "unsupported", "message": "Automaattinen Git-päivitys toimii lähdekoodiasennuksessa."}
 
-    inside_worktree = _git_output(["rev-parse", "--is-inside-work-tree"])
-    if inside_worktree.lower() != "true":
+    if not (PROJECT_DIR / ".git").exists():
+        return {"state": "unsupported", "message": "Sovelluskansio ei ole Git-repositorio."}
+
+    try:
+        inside_worktree = _run_git_command(["rev-parse", "--is-inside-work-tree"])
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("Git-repositorion tarkistus aikakatkaistiin.") from error
+    if inside_worktree.returncode != 0:
+        details = (inside_worktree.stderr or inside_worktree.stdout or "").strip()
+        raise RuntimeError(details or "Git-repositorion tarkistus epäonnistui.")
+    if inside_worktree.stdout.strip().lower() != "true":
         return {"state": "unsupported", "message": "Sovelluskansio ei ole Git-repositorio."}
 
     current_branch = _git_output(["branch", "--show-current"])
@@ -1107,14 +1216,20 @@ def check_github_update_status() -> dict:
     if local_sha == remote_sha:
         return {"state": "current", "message": "Sovellus on ajan tasalla."}
 
-    ancestor = _run_git_command(["merge-base", "--is-ancestor", "HEAD", remote_ref])
+    try:
+        ancestor = _run_git_command(["merge-base", "--is-ancestor", "HEAD", remote_ref])
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("Git-versioiden vertailu aikakatkaistiin.") from error
     if ancestor.returncode == 0:
         return {"state": "available", "local": local_sha, "remote": remote_sha}
+    if ancestor.returncode == 1:
+        return {
+            "state": "diverged",
+            "message": "Paikallinen ja GitHubin versio ovat eronneet; automaattinen päivitys ohitetaan.",
+        }
 
-    return {
-        "state": "diverged",
-        "message": "Paikallinen ja GitHubin versio ovat eronneet; automaattinen päivitys ohitetaan.",
-    }
+    details = (ancestor.stderr or ancestor.stdout or "").strip()
+    raise RuntimeError(details or "Git-versioiden vertailu epäonnistui.")
 
 
 def apply_github_update() -> None:
@@ -1129,7 +1244,10 @@ def apply_github_update() -> None:
     if _git_output(["status", "--porcelain"]):
         raise RuntimeError("Paikallisia muutoksia on auki, päivitystä ei tehdä automaattisesti.")
 
-    result = _run_git_command(["pull", "--ff-only", UPDATE_REMOTE, UPDATE_BRANCH], timeout=120)
+    try:
+        result = _run_git_command(["pull", "--ff-only", UPDATE_REMOTE, UPDATE_BRANCH], timeout=120)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("GitHub-päivitys aikakatkaistiin.") from error
     if result.returncode != 0:
         details = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(details or "GitHub-päivitys epäonnistui.")
@@ -2265,12 +2383,7 @@ class WeatherWidget(tk.Tk):
             self.status_var.set("Automaattinen käynnistys poistettu käytöstä.")
 
     def _search_from_popup(self) -> None:
-        city = self.detail_city_var.get().strip()
-        if not city:
-            messagebox.showinfo(APP_NAME, "Kirjoita paikkakunnan nimi.")
-            return
-
-        self.refresh_weather(city)
+        self.refresh_weather(self.detail_city_var.get())
 
     def _open_open_meteo_terms(self) -> None:
         try:
@@ -2327,9 +2440,17 @@ class WeatherWidget(tk.Tk):
         self._set_popup_theme(self._next_popup_theme_id())
 
     def refresh_weather(self, city_override: str | None = None) -> None:
-        city = (city_override if city_override is not None else self.city_var.get()).strip()
+        city = _normalize_city_query(
+            city_override if city_override is not None else self.city_var.get()
+        )
         if not city:
             messagebox.showinfo(APP_NAME, "Kirjoita paikkakunnan nimi.")
+            return
+        if len(city) > MAX_CITY_QUERY_LENGTH:
+            messagebox.showinfo(
+                APP_NAME,
+                f"Paikkakunnan nimi saa olla enintään {MAX_CITY_QUERY_LENGTH} merkkiä.",
+            )
             return
 
         if self.fetch_in_progress:

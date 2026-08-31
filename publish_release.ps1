@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$releaseBranch = 'main'
 
 function Invoke-RequiredCommand {
     param(
@@ -13,16 +14,33 @@ function Invoke-RequiredCommand {
         [string[]]$Arguments
     )
 
-    & $Command @Arguments
-    if ($LASTEXITCODE -ne 0) {
+    & $Command @Arguments | Out-Host
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
         throw "Command failed: $Command $($Arguments -join ' ')"
     }
+}
+
+function Get-RequiredCommandOutput {
+    param(
+        [string]$Command,
+        [string[]]$Arguments
+    )
+
+    $output = & $Command @Arguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "Command failed: $Command $($Arguments -join ' ')"
+    }
+    return $output
 }
 
 function Get-NextPatchVersion {
     Invoke-RequiredCommand -Command 'git' -Arguments @('fetch', '--tags', 'origin')
 
-    $latestTag = git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname |
+    $latestTag = Get-RequiredCommandOutput -Command 'git' -Arguments @(
+        'tag', '--list', 'v[0-9]*.[0-9]*.[0-9]*', '--sort=-v:refname'
+    ) |
         Select-Object -First 1
 
     if (-not $latestTag) {
@@ -40,26 +58,35 @@ function Get-NextPatchVersion {
 }
 
 function Assert-CleanWorkingTree {
-    $changes = git status --porcelain
+    $changes = Get-RequiredCommandOutput -Command 'git' -Arguments @('status', '--porcelain')
     if ($changes) {
         throw "Working tree is not clean. Commit or stash changes before publishing a release."
     }
 }
 
 function Sync-CurrentBranch {
-    $branch = git branch --show-current
+    param([string]$ExpectedBranch)
+
+    $branch = Get-RequiredCommandOutput -Command 'git' -Arguments @('branch', '--show-current')
     if (-not $branch) {
         throw 'Current checkout is not on a branch.'
+    }
+    if ($branch -ne $ExpectedBranch) {
+        throw "Releases must be published from $ExpectedBranch. Current branch: $branch"
     }
 
     Invoke-RequiredCommand -Command 'git' -Arguments @('fetch', 'origin', $branch)
 
-    $behind = [int](git rev-list --count "HEAD..origin/$branch")
+    $behind = [int](Get-RequiredCommandOutput -Command 'git' -Arguments @(
+        'rev-list', '--count', "HEAD..origin/$branch"
+    ))
     if ($behind -gt 0) {
         throw "Local branch is behind origin/$branch. Pull first, then publish."
     }
 
-    $ahead = [int](git rev-list --count "origin/$branch..HEAD")
+    $ahead = [int](Get-RequiredCommandOutput -Command 'git' -Arguments @(
+        'rev-list', '--count', "origin/$branch..HEAD"
+    ))
     if ($ahead -gt 0) {
         Invoke-RequiredCommand -Command 'git' -Arguments @('push', 'origin', $branch)
     }
@@ -80,7 +107,7 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
 
 Invoke-RequiredCommand -Command 'gh' -Arguments @('auth', 'status')
 Assert-CleanWorkingTree
-$branch = Sync-CurrentBranch
+$branch = Sync-CurrentBranch -ExpectedBranch $releaseBranch
 
 if (-not $Version) {
     $Version = Get-NextPatchVersion

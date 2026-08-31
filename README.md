@@ -16,7 +16,7 @@ from the system tray.
 - Near-term precipitation probability based on the next 6 hours
 - Automatic weather refresh every 30 minutes
 - Optional startup shortcut for Windows login
-- Manual app update check from the tray menu when running from a Git checkout
+- Automatic startup check and manual tray update check when running from a Git checkout
 
 ## Requirements
 
@@ -50,7 +50,8 @@ irm https://raw.githubusercontent.com/mikkolaaks0/weather-report/main/install.ps
 Useful flags are `-Startup`, `-NoDesktopShortcut`, `-NoStartMenuShortcut`, and
 `-NoLaunch`. A custom `-InstallDir` must point to an app-specific
 `WeatherReport` folder; the installer refuses broad user, AppData, Programs, or
-drive-root paths before replacing an existing install.
+drive-root paths before replacing an existing install. On updates, an existing
+startup shortcut is preserved and rewritten to the current executable path.
 
 To uninstall the portable install:
 
@@ -73,6 +74,9 @@ For a windowless launch, use:
 ```powershell
 .\start_weather_app.vbs
 ```
+
+Source-mode shortcuts use this launcher so they keep working after a compatible
+Python installation is moved or upgraded.
 
 ## Build
 
@@ -103,9 +107,10 @@ python -m unittest discover -s tests -v
 ```
 
 The tests cover Open-Meteo payload validation and retry behavior, formatting and
-time-window logic, settings persistence, startup paths, all mapped WMO weather
-codes, tray rendering, icon source pairs, PNG transparency, and the PyInstaller
-asset manifest.
+time-window logic, settings persistence, redirected Windows shortcut paths, Git
+update safety, release and installer invariants, all mapped WMO weather codes,
+tray rendering, icon source pairs, PNG transparency, and the PyInstaller asset
+manifest.
 
 ## Bundled Assets
 
@@ -140,8 +145,8 @@ Publish a specific version:
 powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -Version v0.1.1 -SkipInstaller
 ```
 
-The publish script requires a clean working tree, builds the portable package,
-pushes the current branch if needed, creates and pushes a version tag, and
+The publish script requires a clean `main` branch, builds the portable package,
+pushes `main` if needed, creates and pushes a version tag, and
 publishes `release/WeatherReport-portable.zip`, `release/SHA256SUMS.txt`, and the
 Inno Setup installer when one was built. The release version is also passed into
 the Windows installer metadata.
@@ -165,7 +170,8 @@ When running from a Git checkout on the `main` branch, the app can check
 fetches `origin/main`, only applies a fast-forward update to a clean checkout,
 asks before updating, and restarts itself after a successful update. Other
 branches skip the automatic update path to avoid pulling `main` into local
-development work.
+development work. Source runs also perform the same non-destructive update check
+shortly after startup.
 
 The packaged `WeatherReport.exe` does not update itself with Git. Install the
 latest packaged version with `install.ps1`; it queries

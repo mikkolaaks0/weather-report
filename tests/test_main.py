@@ -202,8 +202,8 @@ class ServicePayloadTests(unittest.TestCase):
             def __exit__(self, *_args) -> None:
                 return None
 
-            def read(self) -> bytes:
-                return self.payload
+            def read(self, size: int = -1) -> bytes:
+                return self.payload if size < 0 else self.payload[:size]
 
         with patch.object(main, "urlopen", return_value=Response(b'{"ok": true}')) as mocked_open:
             self.assertEqual(main._get_json("https://example.invalid", {"q": "Espoo"}), {"ok": True})
@@ -215,6 +215,19 @@ class ServicePayloadTests(unittest.TestCase):
             with self.assertRaises(main.WeatherServiceError):
                 main._get_json("https://example.invalid", {})
 
+        with (
+            patch.object(main, "MAX_JSON_RESPONSE_BYTES", 8),
+            patch.object(main, "urlopen", return_value=Response(b"123456789")),
+        ):
+            with self.assertRaisesRegex(main.WeatherServiceError, "liian suuri"):
+                main._get_json("https://example.invalid", {})
+
+    def test_weather_request_normalizes_unknown_temperature_unit(self) -> None:
+        with patch.object(main, "_get_json", return_value={}) as get_json:
+            main.get_weather(60.2, 24.7, " KELVIN ")
+
+        self.assertEqual(get_json.call_args.args[1]["temperature_unit"], "celsius")
+
     def test_geocoding_validates_and_normalizes_coordinates(self) -> None:
         payload = {
             "results": [
@@ -225,15 +238,23 @@ class ServicePayloadTests(unittest.TestCase):
                 }
             ]
         }
-        with patch.object(main, "_get_json", return_value=payload):
-            place = main.geocode_city("Espoo")
+        with patch.object(main, "_get_json", return_value=payload) as get_json:
+            place = main.geocode_city("  Espoo\n Keskus ")
         self.assertEqual(place["latitude"], 60.2055)
         self.assertEqual(place["longitude"], 24.6559)
+        self.assertEqual(get_json.call_args.args[1]["name"], "Espoo Keskus")
 
     def test_geocoding_distinguishes_not_found_from_invalid_payload(self) -> None:
         with patch.object(main, "_get_json", return_value={"results": []}):
             with self.assertRaises(main.CityNotFoundError):
                 main.geocode_city("Missing")
+
+        with patch.object(main, "_get_json") as get_json:
+            with self.assertRaises(main.CityNotFoundError):
+                main.geocode_city("   ")
+            with self.assertRaisesRegex(main.WeatherServiceError, "enintään"):
+                main.geocode_city("x" * (main.MAX_CITY_QUERY_LENGTH + 1))
+        get_json.assert_not_called()
 
         with patch.object(main, "_get_json", return_value={"results": {}}):
             with self.assertRaises(main.WeatherServiceError):
@@ -272,13 +293,23 @@ class ServicePayloadTests(unittest.TestCase):
 
 
 class SettingsAndShortcutTests(unittest.TestCase):
+    def test_settings_directory_uses_local_appdata_as_fallback(self) -> None:
+        local_appdata = Path(r"C:\Users\Example\AppData\Local")
+        with patch.dict(
+            main.os.environ,
+            {"APPDATA": "", "LOCALAPPDATA": str(local_appdata)},
+        ):
+            settings_dir = main._resolve_settings_dir()
+
+        self.assertEqual(settings_dir, local_appdata / main.APP_SLUG)
+
     def test_settings_are_whitelisted_and_normalized(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             settings_path = Path(temporary_dir) / "weather_settings.json"
             settings_path.write_text(
                 json.dumps(
                     {
-                        "city": "  Espoo  ",
+                        "city": "  Espoo\n  Keskus  ",
                         "temperature_unit": "KELVIN",
                         "popup_theme": "NOT-A-THEME",
                         "legacy": "ignored",
@@ -293,7 +324,7 @@ class SettingsAndShortcutTests(unittest.TestCase):
             self.assertEqual(
                 settings,
                 {
-                    "city": "Espoo",
+                    "city": "Espoo Keskus",
                     "temperature_unit": "celsius",
                     "popup_theme": main.DEFAULT_POPUP_THEME,
                 },
@@ -310,7 +341,55 @@ class SettingsAndShortcutTests(unittest.TestCase):
             self.assertEqual(json.loads(settings_path.read_text(encoding="utf-8")), original)
             self.assertEqual(list(settings_path.parent.glob(".*.tmp")), [])
 
-    def test_source_shortcut_quotes_main_script_path(self) -> None:
+    def test_desktop_shortcut_uses_redirected_windows_desktop(self) -> None:
+        class RegistryKey:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+        class FakeWinreg:
+            HKEY_CURRENT_USER = object()
+
+            @staticmethod
+            def OpenKey(_root, _path):
+                return RegistryKey()
+
+            @staticmethod
+            def QueryValueEx(_key, _name):
+                return (r"%USERPROFILE%\OneDrive\Desktop", 2)
+
+        userprofile = Path(r"C:\Users\Example")
+        with (
+            patch.dict(main.sys.modules, {"winreg": FakeWinreg}),
+            patch.dict(main.os.environ, {"USERPROFILE": str(userprofile)}),
+        ):
+            shortcut_path = main.get_desktop_shortcut_path()
+
+        self.assertEqual(shortcut_path, userprofile / "OneDrive" / "Desktop" / main.DESKTOP_SHORTCUT_NAME)
+
+    def test_source_shortcut_uses_stable_windowless_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            project_dir = Path(temporary_dir) / "Weather Report"
+            project_dir.mkdir()
+            launcher_path = project_dir / "start_weather_app.vbs"
+            launcher_path.touch()
+            wscript_path = Path(r"C:\Windows\System32\wscript.exe")
+            with (
+                patch.object(main, "IS_FROZEN", False),
+                patch.object(main, "PROJECT_DIR", project_dir),
+                patch.object(main, "_resolve_wscript_executable", return_value=wscript_path),
+                patch.object(main, "_resolve_pythonw_executable") as resolve_pythonw,
+            ):
+                target, arguments, working_dir, _icon = main._resolve_shortcut_target()
+
+        self.assertEqual(target, str(wscript_path))
+        self.assertEqual(arguments, subprocess.list2cmdline([str(launcher_path.resolve())]))
+        self.assertEqual(working_dir, str(project_dir))
+        resolve_pythonw.assert_not_called()
+
+    def test_source_shortcut_falls_back_to_quoted_main_script_path(self) -> None:
         project_dir = Path(r"C:\Users\Example User\Weather Report")
         pythonw_path = Path(r"C:\Python\pythonw.exe")
         expected_script = str((project_dir / "main.py").resolve())
@@ -324,6 +403,59 @@ class SettingsAndShortcutTests(unittest.TestCase):
         self.assertEqual(target, str(pythonw_path))
         self.assertEqual(arguments, subprocess.list2cmdline([expected_script]))
         self.assertEqual(working_dir, str(project_dir))
+
+    def test_pythonw_fallback_rejects_unsupported_interpreters(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            old_pythonw = root / "Programs" / "Python" / "Python39" / "pythonw.exe"
+            current_pythonw = root / "Programs" / "Python" / "Python312" / "pythonw.exe"
+            old_pythonw.parent.mkdir(parents=True)
+            current_pythonw.parent.mkdir(parents=True)
+            old_pythonw.touch()
+            current_pythonw.touch()
+
+            with (
+                patch.object(main.sys, "executable", str(root / "runtime" / "python.exe")),
+                patch.object(main.shutil, "which", return_value=None),
+                patch.dict(main.os.environ, {"LOCALAPPDATA": str(root)}),
+                patch.object(
+                    main,
+                    "_is_supported_pythonw",
+                    side_effect=lambda path: path == current_pythonw,
+                ) as is_supported,
+            ):
+                resolved = main._resolve_pythonw_executable()
+
+            self.assertEqual(resolved, current_pythonw)
+            is_supported.assert_called_once_with(current_pythonw)
+
+    def test_pythonw_probe_handles_success_and_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            pythonw = Path(temporary_dir) / "pythonw.exe"
+            pythonw.touch()
+            supported = subprocess.CompletedProcess([], 0)
+            with patch.object(main.subprocess, "run", return_value=supported):
+                self.assertTrue(main._is_supported_pythonw(pythonw))
+
+            timeout = subprocess.TimeoutExpired([str(pythonw)], 5)
+            with patch.object(main.subprocess, "run", side_effect=timeout):
+                self.assertFalse(main._is_supported_pythonw(pythonw))
+
+    def test_shortcut_creation_uses_noninteractive_powershell(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            shortcut_path = Path(temporary_dir) / "Weather Report.lnk"
+            with (
+                patch.object(main.shutil, "which", return_value=r"C:\Windows\powershell.exe"),
+                patch.object(
+                    main,
+                    "_resolve_shortcut_target",
+                    return_value=("target.exe", "", temporary_dir, "target.exe"),
+                ),
+                patch.object(main.subprocess, "run") as run,
+            ):
+                main.create_windows_shortcut(shortcut_path)
+
+        self.assertIn("-NonInteractive", run.call_args.args[0])
 
     def test_startup_paths_include_current_and_legacy_installer_names(self) -> None:
         appdata = Path(r"C:\Users\Example\AppData\Roaming")
@@ -406,26 +538,95 @@ class TrayMenuTests(unittest.TestCase):
 
 
 class UpdateSafetyTests(unittest.TestCase):
+    def test_git_commands_disable_hidden_credential_prompts(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with (
+            patch.object(main.shutil, "which", return_value=r"C:\Git\git.exe"),
+            patch.object(main.subprocess, "run", return_value=completed) as run,
+        ):
+            main._run_git_command(["status", "--porcelain"])
+
+        self.assertEqual(run.call_args.kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
+
     def test_update_status_fetches_origin_main_and_reports_fast_forward(self) -> None:
+        inside_worktree = subprocess.CompletedProcess([], 0, stdout="true\n", stderr="")
+        fast_forward = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         with (
             patch.object(
                 main,
                 "_git_output",
-                side_effect=["true", "main", "", "", "local-sha", "remote-sha"],
+                side_effect=["main", "", "", "local-sha", "remote-sha"],
             ) as git_output,
-            patch.object(main, "_run_git_command") as run_git,
+            patch.object(
+                main,
+                "_run_git_command",
+                side_effect=[inside_worktree, fast_forward],
+            ) as run_git,
         ):
-            run_git.return_value.returncode = 0
             status = main.check_github_update_status()
 
         self.assertEqual(status["state"], "available")
         self.assertEqual(status["local"], "local-sha")
         self.assertEqual(status["remote"], "remote-sha")
-        self.assertEqual(git_output.call_args_list[3].args[0], ["fetch", "origin", "main"])
+        self.assertEqual(git_output.call_args_list[2].args[0], ["fetch", "origin", "main"])
         self.assertEqual(
-            run_git.call_args.args[0],
+            run_git.call_args_list[1].args[0],
             ["merge-base", "--is-ancestor", "HEAD", "origin/main"],
         )
+
+    def test_update_status_handles_non_repository_and_git_comparison_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir, patch.object(
+            main,
+            "PROJECT_DIR",
+            Path(temporary_dir),
+        ), patch.object(main, "_run_git_command") as run_git:
+            status = main.check_github_update_status()
+        self.assertEqual(status["state"], "unsupported")
+        run_git.assert_not_called()
+
+        repository_error = subprocess.CompletedProcess([], 128, stdout="", stderr="broken repository")
+        with patch.object(main, "_run_git_command", return_value=repository_error):
+            with self.assertRaisesRegex(RuntimeError, "broken repository"):
+                main.check_github_update_status()
+
+        inside_worktree = subprocess.CompletedProcess([], 0, stdout="true\n", stderr="")
+        comparison_error = subprocess.CompletedProcess([], 128, stdout="", stderr="broken graph")
+        with (
+            patch.object(
+                main,
+                "_git_output",
+                side_effect=["main", "", "", "local-sha", "remote-sha"],
+            ),
+            patch.object(
+                main,
+                "_run_git_command",
+                side_effect=[inside_worktree, comparison_error],
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "broken graph"):
+                main.check_github_update_status()
+
+        comparison_timeout = subprocess.TimeoutExpired(["git", "merge-base"], 30)
+        with (
+            patch.object(
+                main,
+                "_git_output",
+                side_effect=["main", "", "", "local-sha", "remote-sha"],
+            ),
+            patch.object(
+                main,
+                "_run_git_command",
+                side_effect=[inside_worktree, comparison_timeout],
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "vertailu aikakatkaistiin"):
+                main.check_github_update_status()
+
+    def test_git_timeout_is_reported_as_application_error(self) -> None:
+        timeout = subprocess.TimeoutExpired(["git", "fetch"], 30)
+        with patch.object(main, "_run_git_command", side_effect=timeout):
+            with self.assertRaisesRegex(RuntimeError, "aikakatkaistiin"):
+                main._git_output(["fetch", "origin", "main"])
 
     def test_packaged_update_path_is_not_mistaken_for_git_update(self) -> None:
         with patch.object(main, "IS_FROZEN", True):
@@ -478,6 +679,43 @@ class PackagingManifestTests(unittest.TestCase):
         self.assertIsNotNone(build_match)
         self.assertIsNotNone(installer_match)
         self.assertEqual(build_match.group(1), installer_match.group(1))
+
+    def test_installers_share_location_and_replace_stale_startup_shortcuts(self) -> None:
+        install_script = (main.PROJECT_DIR / "install.ps1").read_text(encoding="utf-8")
+        installer_script = (main.PROJECT_DIR / "installer.iss").read_text(encoding="utf-8")
+
+        self.assertIn("Programs\\WeatherReport", install_script)
+        self.assertIn("if ($Startup -or $startupWasEnabled)", install_script)
+        self.assertIn("-Path $startupShortcutPath", install_script)
+        self.assertIn("$newInstallActivated = $true", install_script)
+        self.assertIn("previous version could not be fully restored", install_script)
+        self.assertIn("DefaultDirName={localappdata}\\Programs\\WeatherReport", installer_script)
+        self.assertIn(
+            'Name: "{userstartup}\\Weather Report.lnk"; Tasks: startupshortcut',
+            installer_script,
+        )
+        self.assertNotIn(
+            'Type: files; Name: "{userstartup}\\weather-report.lnk"',
+            installer_script,
+        )
+
+    def test_release_publishing_is_restricted_to_main(self) -> None:
+        publish_script = (main.PROJECT_DIR / "publish_release.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("$releaseBranch = 'main'", publish_script)
+        self.assertIn("Sync-CurrentBranch -ExpectedBranch $releaseBranch", publish_script)
+        self.assertIn("function Get-RequiredCommandOutput", publish_script)
+
+    def test_uninstaller_settings_path_has_local_appdata_fallback(self) -> None:
+        uninstall_script = (main.PROJECT_DIR / "uninstall.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("else { $env:LOCALAPPDATA }", uninstall_script)
+
+    def test_source_launcher_checks_fallback_python_version(self) -> None:
+        launcher = (main.PROJECT_DIR / "start_weather_app.bat").read_text(encoding="utf-8")
+
+        fallback_block = launcher.split("for /f", maxsplit=1)[1].split("where py", maxsplit=1)[0]
+        self.assertIn("sys.version_info < (3,10)", fallback_block)
 
     def test_pyinstaller_manifest_contains_every_runtime_asset(self) -> None:
         class AnalysisStub:

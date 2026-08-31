@@ -12,7 +12,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 VersionInfoVersion={#AppVersion}
 AppPublisher={#AppPublisher}
-DefaultDirName={autopf}\{#AppName}
+DefaultDirName={localappdata}\Programs\WeatherReport
 DefaultGroupName={#AppName}
 OutputDir=release
 OutputBaseFilename=WeatherReport-Setup
@@ -35,7 +35,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "{#BuildRoot}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
-Type: files; Name: "{userstartup}\Weather Report.lnk"
+Type: files; Name: "{userstartup}\Weather Report.lnk"; Tasks: startupshortcut
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"

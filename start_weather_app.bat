@@ -21,8 +21,11 @@ if %errorlevel%==0 (
 
 for /f "delims=" %%D in ('dir /b /ad /o-n "%LocalAppData%\Programs\Python\Python3??" 2^>nul') do (
     if exist "%LocalAppData%\Programs\Python\%%D\pythonw.exe" (
-        start "" "%LocalAppData%\Programs\Python\%%D\pythonw.exe" ".\main.py"
-        exit /b 0
+        "%LocalAppData%\Programs\Python\%%D\pythonw.exe" -c "import sys;raise SystemExit(sys.version_info < (3,10))"
+        if not errorlevel 1 (
+            start "" "%LocalAppData%\Programs\Python\%%D\pythonw.exe" ".\main.py"
+            exit /b 0
+        )
     )
 )
 

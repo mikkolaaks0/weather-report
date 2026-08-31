@@ -17,6 +17,12 @@ $apiUrl = "https://api.github.com/repos/$repo/releases/latest"
 $downloadDir = Join-Path ([System.IO.Path]::GetTempPath()) ("WeatherReportInstall-$([guid]::NewGuid().ToString('N'))")
 $appName = 'Weather Report'
 $exeName = 'WeatherReport.exe'
+$startupDirectory = [Environment]::GetFolderPath('Startup')
+$startupShortcutPath = Join-Path $startupDirectory 'weather-report.lnk'
+$legacyStartupShortcutPath = Join-Path $startupDirectory "$appName.lnk"
+$startupWasEnabled =
+    (Test-Path -LiteralPath $startupShortcutPath) -or
+    (Test-Path -LiteralPath $legacyStartupShortcutPath)
 
 function Invoke-Download {
     param(
@@ -156,6 +162,8 @@ function Test-AssetChecksum {
 Write-Host "Installing $appName..."
 
 New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
+$newInstallActivated = $false
+try {
 Assert-SafeInstallDirectory -Path $InstallDir
 $InstallDir = Normalize-PathForSafety $InstallDir
 $release = Get-LatestRelease
@@ -188,6 +196,7 @@ if ($hadExistingInstall) {
 
 try {
     Move-Item -LiteralPath $stagedAppDir -Destination $InstallDir
+    $newInstallActivated = $true
 }
 catch {
     if (Test-Path -LiteralPath $InstallDir) {
@@ -199,14 +208,6 @@ catch {
     throw
 }
 
-if (Test-Path -LiteralPath $backupDir) {
-    try {
-        Remove-Item -LiteralPath $backupDir -Recurse -Force
-    }
-    catch {
-        Write-Warning "The previous installation backup could not be removed: $backupDir"
-    }
-}
 $exePath = Join-Path $InstallDir $exeName
 
 $appDir = Split-Path -Parent $exePath
@@ -236,14 +237,14 @@ if (-not $NoDesktopShortcut) {
         -Icon $iconPath
 }
 
-if ($Startup) {
-    $startup = [Environment]::GetFolderPath('Startup')
-    $legacyStartupShortcut = Join-Path $startup "$appName.lnk"
-    if (Test-Path -LiteralPath $legacyStartupShortcut) {
-        Remove-Item -LiteralPath $legacyStartupShortcut -Force
+if ($Startup -or $startupWasEnabled) {
+    foreach ($shortcutPath in @($startupShortcutPath, $legacyStartupShortcutPath)) {
+        if (Test-Path -LiteralPath $shortcutPath) {
+            Remove-Item -LiteralPath $shortcutPath -Force
+        }
     }
     New-Shortcut `
-        -Path (Join-Path $startup 'weather-report.lnk') `
+        -Path $startupShortcutPath `
         -Target $exePath `
         -WorkingDirectory $appDir `
         -Icon $iconPath
@@ -253,20 +254,48 @@ if (-not $NoLaunch) {
     Start-Process -FilePath $exePath -WorkingDirectory $appDir
 }
 
-$normalizedDownloadDir = Normalize-PathForSafety $downloadDir
-$normalizedTempDir = Normalize-PathForSafety ([System.IO.Path]::GetTempPath())
-$downloadPrefix = "$normalizedTempDir\WeatherReportInstall-"
-if (
-    $normalizedDownloadDir.StartsWith($downloadPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
-    (Test-Path -LiteralPath $normalizedDownloadDir)
-) {
+if (Test-Path -LiteralPath $backupDir) {
     try {
-        Remove-Item -LiteralPath $normalizedDownloadDir -Recurse -Force
+        Remove-Item -LiteralPath $backupDir -Recurse -Force
     }
     catch {
-        Write-Warning "Temporary installer files could not be removed: $normalizedDownloadDir"
+        Write-Warning "The previous installation backup could not be removed: $backupDir"
     }
 }
 
 Write-Host "$appName installed successfully."
 Write-Host "Install location: $appDir"
+}
+catch {
+    $installError = $_
+    if ($newInstallActivated) {
+        try {
+            if (Test-Path -LiteralPath $InstallDir) {
+                Remove-Item -LiteralPath $InstallDir -Recurse -Force
+            }
+            if ($hadExistingInstall -and (Test-Path -LiteralPath $backupDir)) {
+                Move-Item -LiteralPath $backupDir -Destination $InstallDir
+            }
+        }
+        catch {
+            Write-Warning "Installation failed and the previous version could not be fully restored: $($_.Exception.Message)"
+        }
+    }
+    throw $installError
+}
+finally {
+    $normalizedDownloadDir = Normalize-PathForSafety $downloadDir
+    $normalizedTempDir = Normalize-PathForSafety ([System.IO.Path]::GetTempPath())
+    $downloadPrefix = "$normalizedTempDir\WeatherReportInstall-"
+    if (
+        $normalizedDownloadDir.StartsWith($downloadPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+        (Test-Path -LiteralPath $normalizedDownloadDir)
+    ) {
+        try {
+            Remove-Item -LiteralPath $normalizedDownloadDir -Recurse -Force
+        }
+        catch {
+            Write-Warning "Temporary installer files could not be removed: $normalizedDownloadDir"
+        }
+    }
+}

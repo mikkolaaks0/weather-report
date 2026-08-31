@@ -63,7 +63,8 @@ function Assert-SafeInstallDirectory {
 }
 
 $appName = 'Weather Report'
-$settingDir = Join-Path $env:APPDATA 'weather-report'
+$settingsRoot = if ($env:APPDATA) { $env:APPDATA } else { $env:LOCALAPPDATA }
+$settingDir = if ($settingsRoot) { Join-Path $settingsRoot 'weather-report' } else { $null }
 $shortcutPaths = @(
     (Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) "$appName.lnk"),
     (Join-Path ([Environment]::GetFolderPath('Programs')) "$appName.lnk"),
@@ -88,7 +89,7 @@ if (Test-Path -LiteralPath $InstallDir) {
     Remove-Item -LiteralPath $InstallDir -Recurse -Force
 }
 
-if ($RemoveSettings -and (Test-Path -LiteralPath $settingDir)) {
+if ($RemoveSettings -and $settingDir -and (Test-Path -LiteralPath $settingDir)) {
     Remove-Item -LiteralPath $settingDir -Recurse -Force
 }
 
