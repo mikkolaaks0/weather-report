@@ -678,7 +678,16 @@ class PackagingManifestTests(unittest.TestCase):
 
         self.assertIsNotNone(build_match)
         self.assertIsNotNone(installer_match)
+        self.assertEqual(main.APP_VERSION, build_match.group(1))
         self.assertEqual(build_match.group(1), installer_match.group(1))
+
+    def test_footer_contains_data_terms_and_version(self) -> None:
+        self.assertIn("Säädata: Open-Meteo", main.FOOTER_TEXT)
+        self.assertIn("Käyttöehdot", main.FOOTER_TEXT)
+        self.assertIn(
+            f"• Versio: {main.APP_VERSION} ({main.APP_VERSION_DATE})",
+            main.FOOTER_TEXT,
+        )
 
     def test_installers_share_location_and_replace_stale_startup_shortcuts(self) -> None:
         install_script = (main.PROJECT_DIR / "install.ps1").read_text(encoding="utf-8")

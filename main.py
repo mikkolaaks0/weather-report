@@ -35,6 +35,12 @@ except Exception:  # noqa: BLE001
 
 APP_NAME = "Weather Report"
 APP_SLUG = "weather-report"
+APP_VERSION = "0.1.1"
+APP_VERSION_DATE = "01.09.2026"
+FOOTER_TEXT = (
+    f"Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot "
+    f"• Versio: {APP_VERSION} ({APP_VERSION_DATE})"
+)
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_TERMS_URL = "https://open-meteo.com/en/terms"
@@ -1965,7 +1971,7 @@ class WeatherWidget(tk.Tk):
         self.footer_label = self.popup_bg_canvas.create_text(
             0,
             0,
-            text="Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot",
+            text=FOOTER_TEXT,
             anchor="se",
             font=(TEXT_FONT, 8),
             fill="#A7B6DB",
@@ -2724,7 +2730,7 @@ class WeatherWidget(tk.Tk):
 
         self._apply_forecast_cards(daily)
 
-        self.popup_bg_canvas.itemconfigure(self.footer_label, text="Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot")
+        self.popup_bg_canvas.itemconfigure(self.footer_label, text=FOOTER_TEXT)
         self.fetch_in_progress = False
         self._schedule_refresh()
         self._run_pending_city_search()
