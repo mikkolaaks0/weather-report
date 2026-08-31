@@ -612,10 +612,14 @@ class UpdateSafetyTests(unittest.TestCase):
             main,
             "_run_git_command",
             return_value=subprocess.CompletedProcess([], 0, stdout="true\n", stderr=""),
-        ), patch.object(main, "SOURCE_FILE_SIGNATURE_AT_START", (1, 1)), patch.object(
+        ), patch.object(
             main,
-            "_source_file_signature",
-            return_value=(2, 2),
+            "RUNTIME_FILE_SIGNATURE_AT_START",
+            (("main.py", 1, 1),),
+        ), patch.object(
+            main,
+            "_runtime_file_signature",
+            return_value=(("assets/weather-icons/sun.png", 2, 2),),
         ):
             status = main.check_github_update_status()
 

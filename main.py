@@ -65,18 +65,40 @@ APP_EXECUTABLE_PATH = Path(sys.executable).resolve()
 APP_WORKING_DIR = APP_EXECUTABLE_PATH.parent if IS_FROZEN else PROJECT_DIR
 
 
-def _source_file_signature() -> tuple[int, int] | None:
+def _runtime_file_signature() -> tuple[tuple[str, int, int], ...] | None:
     if IS_FROZEN:
         return None
 
-    try:
-        source_stat = (PROJECT_DIR / "main.py").stat()
-    except OSError:
-        return None
-    return source_stat.st_mtime_ns, source_stat.st_size
+    roots = [
+        PROJECT_DIR / "main.py",
+        PROJECT_DIR / "start_weather_app.bat",
+        PROJECT_DIR / "start_weather_app.vbs",
+        PROJECT_DIR / "assets",
+    ]
+    files: list[Path] = []
+    for root in roots:
+        if root.is_file():
+            files.append(root)
+        elif root.is_dir():
+            files.extend(path for path in root.rglob("*") if path.is_file())
+
+    signature: list[tuple[str, int, int]] = []
+    for path in files:
+        try:
+            file_stat = path.stat()
+        except OSError:
+            continue
+        signature.append(
+            (
+                str(path.relative_to(PROJECT_DIR)).casefold(),
+                file_stat.st_mtime_ns,
+                file_stat.st_size,
+            )
+        )
+    return tuple(sorted(signature))
 
 
-SOURCE_FILE_SIGNATURE_AT_START = _source_file_signature()
+RUNTIME_FILE_SIGNATURE_AT_START = _runtime_file_signature()
 
 
 def _resolve_settings_dir() -> Path:
@@ -1235,7 +1257,7 @@ def check_github_update_status() -> dict:
     remote_ref = f"{UPDATE_REMOTE}/{UPDATE_BRANCH}"
     remote_sha = _git_output(["rev-parse", remote_ref])
     if local_sha == remote_sha:
-        if _source_file_signature() != SOURCE_FILE_SIGNATURE_AT_START:
+        if _runtime_file_signature() != RUNTIME_FILE_SIGNATURE_AT_START:
             return {
                 "state": "restart_available",
                 "message": (
