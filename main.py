@@ -37,9 +37,10 @@ APP_NAME = "Weather Report"
 APP_SLUG = "weather-report"
 APP_VERSION = "0.1.1"
 APP_VERSION_DATE = "01.09.2026"
+APP_VERSION_LABEL = f"{APP_VERSION} ({APP_VERSION_DATE})"
 FOOTER_TEXT = (
     f"Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot "
-    f"• Versio: {APP_VERSION} ({APP_VERSION_DATE})"
+    f"• Versio: {APP_VERSION_LABEL}"
 )
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -62,6 +63,20 @@ RUNTIME_DIR = Path(getattr(sys, "_MEIPASS", PROJECT_DIR))
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 APP_EXECUTABLE_PATH = Path(sys.executable).resolve()
 APP_WORKING_DIR = APP_EXECUTABLE_PATH.parent if IS_FROZEN else PROJECT_DIR
+
+
+def _source_file_signature() -> tuple[int, int] | None:
+    if IS_FROZEN:
+        return None
+
+    try:
+        source_stat = (PROJECT_DIR / "main.py").stat()
+    except OSError:
+        return None
+    return source_stat.st_mtime_ns, source_stat.st_size
+
+
+SOURCE_FILE_SIGNATURE_AT_START = _source_file_signature()
 
 
 def _resolve_settings_dir() -> Path:
@@ -1220,7 +1235,15 @@ def check_github_update_status() -> dict:
     remote_ref = f"{UPDATE_REMOTE}/{UPDATE_BRANCH}"
     remote_sha = _git_output(["rev-parse", remote_ref])
     if local_sha == remote_sha:
-        return {"state": "current", "message": "Sovellus on ajan tasalla."}
+        if _source_file_signature() != SOURCE_FILE_SIGNATURE_AT_START:
+            return {
+                "state": "restart_available",
+                "message": (
+                    "Paikallinen sovellusversio on jo päivittynyt. "
+                    "Käynnistä sovellus uudelleen, jotta muutos tulee käyttöön."
+                ),
+            }
+        return {"state": "current", "message": f"Sovellus on ajan tasalla. Versio: {APP_VERSION_LABEL}."}
 
     try:
         ancestor = _run_git_command(["merge-base", "--is-ancestor", "HEAD", remote_ref])
@@ -1263,12 +1286,17 @@ def restart_application() -> None:
     if IS_FROZEN:
         args = [str(APP_EXECUTABLE_PATH)]
     else:
-        executable = Path(sys.executable).resolve()
-        if executable.name.lower() == "python.exe":
-            sibling_pythonw = executable.with_name("pythonw.exe")
-            if sibling_pythonw.exists():
-                executable = sibling_pythonw
-        args = [str(executable), str((PROJECT_DIR / "main.py").resolve())]
+        launcher_path = (PROJECT_DIR / "start_weather_app.vbs").resolve()
+        wscript_path = _resolve_wscript_executable() if launcher_path.is_file() else None
+        if wscript_path is not None:
+            args = [str(wscript_path), str(launcher_path)]
+        else:
+            executable = _resolve_pythonw_executable()
+            if executable is None:
+                raise FileNotFoundError(
+                    "Sopivaa Windows-käynnistintä ei löytynyt uudelleenkäynnistystä varten."
+                )
+            args = [str(executable), str((PROJECT_DIR / "main.py").resolve())]
 
     subprocess.Popen(  # noqa: S603
         args,
@@ -1547,12 +1575,25 @@ class WeatherWidget(tk.Tk):
         if state == "available":
             should_update = messagebox.askyesno(
                 APP_NAME,
-                "GitHubissa on uudempi versio. Päivitetäänkö sovellus nyt ja käynnistetäänkö se uudelleen?",
+                f"GitHubissa on uudempi versio kuin {APP_VERSION_LABEL}. "
+                "Päivitetäänkö sovellus nyt ja käynnistetäänkö se uudelleen?",
             )
             if should_update:
                 self._apply_app_update()
             else:
                 self.status_var.set("Sovelluspäivitys ohitettiin.")
+            return
+
+        if state == "restart_available":
+            should_restart = messagebox.askyesno(
+                APP_NAME,
+                f"Sovellusversio {APP_VERSION_LABEL} on jo päivittynyt levylle. "
+                "Käynnistetäänkö sovellus uudelleen nyt?",
+            )
+            if should_restart:
+                self._finish_app_update(None)
+            else:
+                self.status_var.set("Sovelluksen uudelleenkäynnistys ohitettiin.")
             return
 
         message = status.get("message", "Sovelluspäivitystä ei voitu tarkistaa.")

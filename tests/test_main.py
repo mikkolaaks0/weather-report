@@ -457,6 +457,20 @@ class SettingsAndShortcutTests(unittest.TestCase):
 
         self.assertIn("-NonInteractive", run.call_args.args[0])
 
+    def test_source_restart_uses_stable_windowless_launcher(self) -> None:
+        wscript_path = Path(r"C:\Windows\System32\wscript.exe")
+        with (
+            patch.object(main, "IS_FROZEN", False),
+            patch.object(main, "_resolve_wscript_executable", return_value=wscript_path),
+            patch.object(main.subprocess, "Popen") as popen,
+        ):
+            main.restart_application()
+
+        self.assertEqual(
+            popen.call_args.args[0],
+            [str(wscript_path), str((main.PROJECT_DIR / "start_weather_app.vbs").resolve())],
+        )
+
     def test_startup_paths_include_current_and_legacy_installer_names(self) -> None:
         appdata = Path(r"C:\Users\Example\AppData\Roaming")
         with patch.dict(main.os.environ, {"APPDATA": str(appdata)}):
@@ -573,6 +587,39 @@ class UpdateSafetyTests(unittest.TestCase):
             run_git.call_args_list[1].args[0],
             ["merge-base", "--is-ancestor", "HEAD", "origin/main"],
         )
+
+    def test_current_update_status_includes_running_version(self) -> None:
+        with patch.object(
+            main,
+            "_git_output",
+            side_effect=["main", "", "", "local-sha", "local-sha"],
+        ), patch.object(
+            main,
+            "_run_git_command",
+            return_value=subprocess.CompletedProcess([], 0, stdout="true\n", stderr=""),
+        ):
+            status = main.check_github_update_status()
+
+        self.assertEqual(status["state"], "current")
+        self.assertIn(main.APP_VERSION_LABEL, status["message"])
+
+    def test_update_status_detects_code_changed_while_process_was_running(self) -> None:
+        with patch.object(
+            main,
+            "_git_output",
+            side_effect=["main", "", "", "local-sha", "local-sha"],
+        ), patch.object(
+            main,
+            "_run_git_command",
+            return_value=subprocess.CompletedProcess([], 0, stdout="true\n", stderr=""),
+        ), patch.object(main, "SOURCE_FILE_SIGNATURE_AT_START", (1, 1)), patch.object(
+            main,
+            "_source_file_signature",
+            return_value=(2, 2),
+        ):
+            status = main.check_github_update_status()
+
+        self.assertEqual(status["state"], "restart_available")
 
     def test_update_status_handles_non_repository_and_git_comparison_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir, patch.object(

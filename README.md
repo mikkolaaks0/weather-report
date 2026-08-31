@@ -171,7 +171,8 @@ fetches `origin/main`, only applies a fast-forward update to a clean checkout,
 asks before updating, and restarts itself after a successful update. Other
 branches skip the automatic update path to avoid pulling `main` into local
 development work. Source runs also perform the same non-destructive update check
-shortly after startup.
+shortly after startup. The check reports the running version and offers a restart
+when the checkout has already changed while the app was open.
 
 The packaged `WeatherReport.exe` does not update itself with Git. Install the
 latest packaged version with `install.ps1`; it queries
