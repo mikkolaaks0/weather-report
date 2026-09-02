@@ -36,7 +36,7 @@ except Exception:  # noqa: BLE001
 APP_NAME = "Weather Report"
 APP_SLUG = "weather-report"
 APP_VERSION = "0.1.1"
-APP_VERSION_DATE = "01.09.2026"
+APP_VERSION_DATE = "02.09.2026"
 APP_VERSION_LABEL = APP_VERSION_DATE
 FOOTER_TEXT = (
     f"Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot "
@@ -131,6 +131,7 @@ APP_FONTS_REGISTERED = False
 STARTUP_SHORTCUT_NAME = f"{APP_SLUG}.lnk"
 LEGACY_STARTUP_SHORTCUT_NAMES = (f"{APP_NAME}.lnk",)
 DESKTOP_SHORTCUT_NAME = f"{APP_NAME}.lnk"
+STARTUP_SHORTCUT_LOCK = threading.RLock()
 
 
 class WeatherServiceError(RuntimeError):
@@ -572,13 +573,10 @@ def load_settings() -> dict:
         "popup_theme": DEFAULT_POPUP_THEME,
     }
 
-    if not SETTINGS_PATH.exists():
-        return settings
-
     try:
         with SETTINGS_PATH.open("r", encoding="utf-8") as handle:
             saved = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, RecursionError):
         return settings
 
     if not isinstance(saved, dict):
@@ -588,16 +586,12 @@ def load_settings() -> dict:
     if city and len(city) <= MAX_CITY_QUERY_LENGTH:
         settings["city"] = city
 
-    temperature_unit = saved.get("temperature_unit")
-    if isinstance(temperature_unit, str):
-        temperature_unit = temperature_unit.strip().lower()
+    temperature_unit = _clean_text(saved.get("temperature_unit")).lower()
     if temperature_unit not in VALID_TEMPERATURE_UNITS:
         temperature_unit = "celsius"
     settings["temperature_unit"] = temperature_unit
 
-    popup_theme = saved.get("popup_theme")
-    if isinstance(popup_theme, str):
-        popup_theme = popup_theme.strip().lower()
+    popup_theme = _clean_text(saved.get("popup_theme")).lower()
     if popup_theme not in POPUP_THEMES:
         popup_theme = DEFAULT_POPUP_THEME
     settings["popup_theme"] = popup_theme
@@ -679,7 +673,7 @@ def geocode_city(city_name: str) -> dict:
 
 
 def get_weather(latitude: float, longitude: float, temperature_unit: str = "celsius") -> dict:
-    normalized_unit = temperature_unit.strip().lower() if isinstance(temperature_unit, str) else ""
+    normalized_unit = _clean_text(temperature_unit).lower()
     if normalized_unit not in VALID_TEMPERATURE_UNITS:
         normalized_unit = "celsius"
 
@@ -761,7 +755,7 @@ def _coerce_number(value: object) -> float | None:
         return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return number if math.isfinite(number) else None
 
@@ -1147,6 +1141,7 @@ def create_windows_shortcut(shortcut_path: Path) -> None:
     target_path, arguments, working_dir, icon_path = _resolve_shortcut_target()
 
     script = (
+        "$ErrorActionPreference = 'Stop'; "
         "$WshShell = New-Object -ComObject WScript.Shell; "
         f"$Shortcut = $WshShell.CreateShortcut('{_ps_escape(shortcut_target)}'); "
         f"$Shortcut.TargetPath = '{_ps_escape(target_path)}'; "
@@ -1172,19 +1167,20 @@ def create_windows_shortcut(shortcut_path: Path) -> None:
 
 
 def set_startup_enabled(enabled: bool) -> None:
-    shortcut_path = get_startup_shortcut_path()
-    shortcut_paths = get_startup_shortcut_paths()
+    with STARTUP_SHORTCUT_LOCK:
+        shortcut_path = get_startup_shortcut_path()
+        shortcut_paths = get_startup_shortcut_paths()
 
-    if not enabled:
+        if not enabled:
+            for candidate in shortcut_paths:
+                if candidate.exists():
+                    candidate.unlink()
+            return
+
+        create_windows_shortcut(shortcut_path)
         for candidate in shortcut_paths:
-            if candidate.exists():
+            if candidate != shortcut_path and candidate.exists():
                 candidate.unlink()
-        return
-
-    create_windows_shortcut(shortcut_path)
-    for candidate in shortcut_paths:
-        if candidate != shortcut_path and candidate.exists():
-            candidate.unlink()
 
 
 def create_desktop_shortcut() -> Path:
@@ -1202,7 +1198,7 @@ def _run_git_command(args: list[str], timeout: int = 30) -> subprocess.Completed
         [git_path, "-C", str(PROJECT_DIR), *args],
         check=False,
         capture_output=True,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "Never"},
         text=True,
         timeout=timeout,
         **_hidden_subprocess_kwargs(),
@@ -1252,19 +1248,21 @@ def check_github_update_status() -> dict:
     if status:
         return {"state": "dirty", "message": "Paikallisia muutoksia on auki, päivitystä ei tehdä automaattisesti."}
 
+    # An already-downloaded update can be activated even without a network connection.
+    if _runtime_file_signature() != RUNTIME_FILE_SIGNATURE_AT_START:
+        return {
+            "state": "restart_available",
+            "message": (
+                "Paikallinen sovellusversio on jo päivittynyt. "
+                "Käynnistä sovellus uudelleen, jotta muutos tulee käyttöön."
+            ),
+        }
+
     _git_output(["fetch", UPDATE_REMOTE, UPDATE_BRANCH], timeout=60)
     local_sha = _git_output(["rev-parse", "HEAD"])
     remote_ref = f"{UPDATE_REMOTE}/{UPDATE_BRANCH}"
     remote_sha = _git_output(["rev-parse", remote_ref])
     if local_sha == remote_sha:
-        if _runtime_file_signature() != RUNTIME_FILE_SIGNATURE_AT_START:
-            return {
-                "state": "restart_available",
-                "message": (
-                    "Paikallinen sovellusversio on jo päivittynyt. "
-                    "Käynnistä sovellus uudelleen, jotta muutos tulee käyttöön."
-                ),
-            }
         return {"state": "current", "message": f"Sovellus on ajan tasalla. Versio: {APP_VERSION_LABEL}."}
 
     try:
@@ -1304,23 +1302,18 @@ def apply_github_update() -> None:
         raise RuntimeError(details or "GitHub-päivitys epäonnistui.")
 
 
-def restart_application() -> None:
+def restart_application() -> subprocess.Popen:
     if IS_FROZEN:
         args = [str(APP_EXECUTABLE_PATH)]
     else:
-        launcher_path = (PROJECT_DIR / "start_weather_app.vbs").resolve()
-        wscript_path = _resolve_wscript_executable() if launcher_path.is_file() else None
-        if wscript_path is not None:
-            args = [str(wscript_path), str(launcher_path)]
-        else:
-            executable = _resolve_pythonw_executable()
-            if executable is None:
-                raise FileNotFoundError(
-                    "Sopivaa Windows-käynnistintä ei löytynyt uudelleenkäynnistystä varten."
-                )
-            args = [str(executable), str((PROJECT_DIR / "main.py").resolve())]
+        # Reuse the working environment, including virtualenv-installed dependencies.
+        executable = Path(sys.executable)
+        pythonw = executable.with_name("pythonw.exe")
+        if os.name == "nt" and pythonw.is_file():
+            executable = pythonw
+        args = [str(executable), str(PROJECT_DIR / "main.py")]
 
-    subprocess.Popen(  # noqa: S603
+    return subprocess.Popen(  # noqa: S603
         args,
         cwd=str(APP_WORKING_DIR),
         close_fds=True,
@@ -1355,6 +1348,7 @@ class WeatherWidget(tk.Tk):
         self.clock_job: str | None = None
         self.bootstrap_job: str | None = None
         self.update_job: str | None = None
+        self.restart_job: str | None = None
         self.ui_poll_job: str | None = None
         self.popup: tk.Toplevel | None = None
         self.forecast_cards: list[dict] = []
@@ -1556,7 +1550,9 @@ class WeatherWidget(tk.Tk):
 
         def worker() -> None:
             try:
-                set_startup_enabled(True)
+                with STARTUP_SHORTCUT_LOCK:
+                    if is_startup_enabled():
+                        set_startup_enabled(True)
             except Exception as error:  # noqa: BLE001
                 self._call_on_ui_thread(
                     lambda error=error: self.status_var.set(
@@ -1591,7 +1587,6 @@ class WeatherWidget(tk.Tk):
         self._start_background_worker(worker)
 
     def _handle_update_check_result(self, status: dict, manual: bool) -> None:
-        self.update_check_in_progress = False
         state = status.get("state")
 
         if state == "available":
@@ -1604,18 +1599,20 @@ class WeatherWidget(tk.Tk):
                 self._apply_app_update()
             else:
                 self.status_var.set("Sovelluspäivitys ohitettiin.")
+                self.update_check_in_progress = False
             return
 
         if state == "restart_available":
             should_restart = messagebox.askyesno(
                 APP_NAME,
-                f"Sovellusversio {APP_VERSION_LABEL} on jo päivittynyt levylle. "
+                "Sovelluksen tiedostot ovat jo päivittyneet levylle. "
                 "Käynnistetäänkö sovellus uudelleen nyt?",
             )
             if should_restart:
                 self._finish_app_update(None)
             else:
                 self.status_var.set("Sovelluksen uudelleenkäynnistys ohitettiin.")
+                self.update_check_in_progress = False
             return
 
         message = status.get("message", "Sovelluspäivitystä ei voitu tarkistaa.")
@@ -1626,8 +1623,10 @@ class WeatherWidget(tk.Tk):
                 messagebox.showerror(APP_NAME, message)
             else:
                 messagebox.showinfo(APP_NAME, message)
+        self.update_check_in_progress = False
 
     def _apply_app_update(self) -> None:
+        self.update_check_in_progress = True
         self.status_var.set("Päivitetään sovellusta GitHubista...")
 
         def worker() -> None:
@@ -1643,15 +1642,28 @@ class WeatherWidget(tk.Tk):
     def _finish_app_update(self, error_text: str | None) -> None:
         if error_text:
             self.status_var.set(f"Sovelluspäivitys epäonnistui: {error_text}")
+            messagebox.showerror(APP_NAME, f"Sovelluspäivitys epäonnistui: {error_text}")
+            self.update_check_in_progress = False
             return
 
         self.status_var.set("Sovellus päivitetty. Käynnistetään uudelleen...")
         try:
-            restart_application()
+            process = restart_application()
         except Exception as error:  # noqa: BLE001
             messagebox.showerror(APP_NAME, f"Päivitys onnistui, mutta uudelleenkäynnistys epäonnistui: {error}")
+            self.update_check_in_progress = False
             return
-        self.after(300, self.destroy)
+        self.restart_job = self.after(1500, lambda: self._check_restart_process(process))
+
+    def _check_restart_process(self, process: subprocess.Popen) -> None:
+        self.restart_job = None
+        if process.poll() is not None:
+            message = "Uusi sovellus sulkeutui käynnistyksessä. Nykyinen sovellus jätettiin käyttöön."
+            self.status_var.set(message)
+            messagebox.showerror(APP_NAME, message)
+            self.update_check_in_progress = False
+            return
+        self.destroy()
 
     def _update_tray_symbol(self, symbol_text: str, title_text: str) -> None:
         self.tray_symbol = symbol_text
@@ -1702,7 +1714,7 @@ class WeatherWidget(tk.Tk):
             return
         self._is_destroying = True
 
-        for job_name in ("clock_job", "refresh_job", "bootstrap_job", "update_job", "ui_poll_job"):
+        for job_name in ("clock_job", "refresh_job", "bootstrap_job", "update_job", "restart_job", "ui_poll_job"):
             job_id = getattr(self, job_name, None)
             if job_id is None:
                 continue
@@ -2434,7 +2446,8 @@ class WeatherWidget(tk.Tk):
             self.refresh_weather()
             return
 
-        if datetime.now() - self.last_weather_update > timedelta(minutes=FRESH_WEATHER_MAX_AGE_MINUTES):
+        age = datetime.now() - self.last_weather_update
+        if age < timedelta(0) or age > timedelta(minutes=FRESH_WEATHER_MAX_AGE_MINUTES):
             self.refresh_weather()
 
     def _toggle_startup(self) -> None:
@@ -2464,7 +2477,7 @@ class WeatherWidget(tk.Tk):
             self.status_var.set("Open-Meteo-linkin avaaminen epäonnistui.")
 
     def _resolve_popup_theme_id(self, theme_id: str | None) -> str:
-        candidate = (theme_id or "").strip().lower()
+        candidate = _clean_text(theme_id).lower()
         return candidate if candidate in POPUP_THEMES else DEFAULT_POPUP_THEME
 
     def _current_popup_theme(self) -> dict:
@@ -2788,7 +2801,8 @@ class WeatherWidget(tk.Tk):
 
         self.status_var.set("")
         self._update_tray_symbol(style.icon_key, f"{city_text}: {current_temp} {style.label}")
-        self.detail_city_var.set(normalized_city)
+        if _normalize_city_query(self.detail_city_var.get()).casefold() == requested_city_text.casefold():
+            self.detail_city_var.set(normalized_city)
         self.startup_var.set(is_startup_enabled())
 
         self._apply_forecast_cards(daily)

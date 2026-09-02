@@ -52,6 +52,9 @@ Useful flags are `-Startup`, `-NoDesktopShortcut`, `-NoStartMenuShortcut`, and
 `WeatherReport` folder; the installer refuses broad user, AppData, Programs, or
 drive-root paths before replacing an existing install. On updates, an existing
 startup shortcut is preserved and rewritten to the current executable path.
+Downloads have time limits, and the installer stops only the executable inside
+the installation being replaced. The old startup shortcut is removed only after
+the replacement has been saved successfully.
 
 To uninstall the portable install:
 
@@ -61,6 +64,9 @@ irm https://raw.githubusercontent.com/mikkolaaks0/weather-report/main/uninstall.
 
 Add `-RemoveSettings` when running a downloaded `uninstall.ps1` file if you also
 want to remove saved settings.
+The uninstaller leaves processes and shortcuts belonging to other installations
+alone. Settings are shared by the user's installations, so `-RemoveSettings`
+also resets their saved preferences.
 
 ## Run From Source
 
@@ -110,7 +116,11 @@ The tests cover Open-Meteo payload validation and retry behavior, formatting and
 time-window logic, settings persistence, redirected Windows shortcut paths, Git
 update safety, release and installer invariants, all mapped WMO weather codes,
 tray rendering, icon source pairs, PNG transparency, and the PyInstaller asset
-manifest.
+manifest. On Windows, the suite also creates and inspects temporary `.lnk` files
+and renders a hidden Tk popup. Temporary local Git repositories exercise actual
+update, restart-detection, and conflict paths without contacting GitHub. Installer
+process selection and release-source checks run in isolation: the suite does not
+run the installer or modify the user's startup shortcuts.
 
 ## Bundled Assets
 
@@ -150,6 +160,9 @@ pushes `main` if needed, creates and pushes a version tag, and
 publishes `release/WeatherReport-portable.zip`, `release/SHA256SUMS.txt`, and the
 Inno Setup installer when one was built. The release version is also passed into
 the Windows installer metadata.
+Publishing checks that the branch, commit, and working tree did not change during
+the build, and tags the exact commit that was built. Automatic patch numbering
+uses stable version tags, ignoring prerelease tags.
 
 The one-line installer uses the latest GitHub Release and verifies the portable
 zip when `SHA256SUMS.txt` is present.
@@ -162,17 +175,27 @@ User settings are stored under:
 %APPDATA%\weather-report\weather_settings.json
 ```
 
+If `APPDATA` is unavailable, the app uses `LOCALAPPDATA`. Invalid settings fields
+fall back to defaults, and an unreadable or malformed settings file does not
+prevent startup.
+
 ## Updates
 
 When running from a Git checkout on the `main` branch, the app can check
 `origin/main` for updates. The current `origin` remote is
-`https://github.com/mikkolaaks0/weather-report.git`. The tray action first
+`https://github.com/mikkolaaks0/weather-report.git`. The tray action
 fetches `origin/main`, only applies a fast-forward update to a clean checkout,
 asks before updating, and restarts itself after a successful update. Other
 branches skip the automatic update path to avoid pulling `main` into local
 development work. Source runs also perform the same non-destructive update check
 shortly after startup. The check reports the running version and offers a restart
 when the checkout has already changed while the app was open.
+That local restart check works without an internet connection. Only one update
+can run at a time, including confirmation and restart. In-app restarts reuse the
+working Python environment instead of searching for another Python installation.
+The current process stays open if the replacement cannot be launched or exits
+during the initial 1.5-second startup check; this is an early-exit check, not a
+full health check. Update failures are shown in a dialog.
 
 The packaged `WeatherReport.exe` does not update itself with Git. Install the
 latest packaged version with `install.ps1`; it queries

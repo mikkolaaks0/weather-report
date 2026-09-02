@@ -30,7 +30,7 @@ function Invoke-Download {
         [string]$OutFile
     )
 
-    Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
+    Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -TimeoutSec 300
 }
 
 function Normalize-PathForSafety {
@@ -86,6 +86,22 @@ function Assert-SafeInstallDirectory {
     }
 }
 
+function Stop-InstalledApplication {
+    param([string]$ExecutablePath)
+
+    $target = Normalize-PathForSafety $ExecutablePath
+    foreach ($process in @(Get-Process -Name 'WeatherReport' -ErrorAction SilentlyContinue)) {
+        if ($process.Path -and (Normalize-PathForSafety $process.Path) -eq $target) {
+            if (-not $process.HasExited) {
+                Stop-Process -InputObject $process -Force
+                if (-not $process.WaitForExit(10000)) {
+                    throw "The installed application did not exit: $target"
+                }
+            }
+        }
+    }
+}
+
 function New-Shortcut {
     param(
         [string]$Path,
@@ -100,6 +116,7 @@ function New-Shortcut {
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($Path)
     $shortcut.TargetPath = $Target
+    $shortcut.Arguments = ''
     $shortcut.WorkingDirectory = $WorkingDirectory
     if ($Icon) {
         $shortcut.IconLocation = $Icon
@@ -108,7 +125,7 @@ function New-Shortcut {
 }
 
 function Get-LatestRelease {
-    $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ 'User-Agent' = 'WeatherReport-Installer' }
+    $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ 'User-Agent' = 'WeatherReport-Installer' } -TimeoutSec 30
     return $release
 }
 
@@ -177,14 +194,14 @@ Test-AssetChecksum -Release $release -AssetName $asset.name -AssetPath $zipPath
 $extractDir = Join-Path $downloadDir 'extracted'
 Write-Host 'Validating package contents...'
 Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
-$stagedExePath = Get-ChildItem -Path $extractDir -Filter $exeName -Recurse |
+$stagedExePath = Get-ChildItem -LiteralPath $extractDir -Filter $exeName -File -Recurse |
     Select-Object -First 1 -ExpandProperty FullName
 if (-not $stagedExePath) {
     throw "$exeName was not found in the downloaded package."
 }
 $stagedAppDir = Split-Path -Parent $stagedExePath
 
-Get-Process -Name 'WeatherReport' -ErrorAction SilentlyContinue | Stop-Process -Force
+Stop-InstalledApplication -ExecutablePath (Join-Path $InstallDir $exeName)
 Write-Host "Extracting to $InstallDir..."
 $installParent = Split-Path -Parent $InstallDir
 New-Item -ItemType Directory -Force -Path $installParent | Out-Null
@@ -238,20 +255,18 @@ if (-not $NoDesktopShortcut) {
 }
 
 if ($Startup -or $startupWasEnabled) {
-    foreach ($shortcutPath in @($startupShortcutPath, $legacyStartupShortcutPath)) {
-        if (Test-Path -LiteralPath $shortcutPath) {
-            Remove-Item -LiteralPath $shortcutPath -Force
-        }
-    }
     New-Shortcut `
         -Path $startupShortcutPath `
         -Target $exePath `
         -WorkingDirectory $appDir `
         -Icon $iconPath
+    if (Test-Path -LiteralPath $legacyStartupShortcutPath -PathType Leaf) {
+        Remove-Item -LiteralPath $legacyStartupShortcutPath -Force
+    }
 }
 
 if (-not $NoLaunch) {
-    Start-Process -FilePath $exePath -WorkingDirectory $appDir
+    Start-Process -FilePath $exePath -WorkingDirectory $appDir -WindowStyle Hidden
 }
 
 if (Test-Path -LiteralPath $backupDir) {

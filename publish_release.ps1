@@ -41,6 +41,7 @@ function Get-NextPatchVersion {
     $latestTag = Get-RequiredCommandOutput -Command 'git' -Arguments @(
         'tag', '--list', 'v[0-9]*.[0-9]*.[0-9]*', '--sort=-v:refname'
     ) |
+        Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
         Select-Object -First 1
 
     if (-not $latestTag) {
@@ -94,6 +95,17 @@ function Sync-CurrentBranch {
     return $branch
 }
 
+function Assert-ReleaseSourceUnchanged {
+    param([string]$Commit, [string]$Branch)
+
+    Assert-CleanWorkingTree
+    $currentCommit = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')
+    $currentBranch = Get-RequiredCommandOutput -Command 'git' -Arguments @('branch', '--show-current')
+    if ($currentCommit -ne $Commit -or $currentBranch -ne $Branch) {
+        throw 'The checkout changed during the build. Rebuild before publishing a release.'
+    }
+}
+
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
@@ -108,6 +120,7 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
 Invoke-RequiredCommand -Command 'gh' -Arguments @('auth', 'status')
 Assert-CleanWorkingTree
 $branch = Sync-CurrentBranch -ExpectedBranch $releaseBranch
+$releaseCommit = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')
 
 if (-not $Version) {
     $Version = Get-NextPatchVersion
@@ -147,7 +160,8 @@ if (-not (Test-Path $checksums)) {
     throw "Release checksum file was not found: $checksums"
 }
 
-Invoke-RequiredCommand -Command 'git' -Arguments @('tag', '-a', $Version, '-m', "Weather Report $Version")
+Assert-ReleaseSourceUnchanged -Commit $releaseCommit -Branch $branch
+Invoke-RequiredCommand -Command 'git' -Arguments @('tag', '-a', $Version, $releaseCommit, '-m', "Weather Report $Version")
 Invoke-RequiredCommand -Command 'git' -Arguments @('push', 'origin', $Version)
 
 $notes = @"
@@ -167,7 +181,7 @@ $releaseArgs += @(
     $checksums,
     '--title', "Weather Report $Version",
     '--notes', $notes,
-    '--target', $branch
+    '--target', $releaseCommit
 )
 if ($Draft) {
     $releaseArgs += '--draft'

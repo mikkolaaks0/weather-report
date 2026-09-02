@@ -6,7 +6,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 
 import main
@@ -121,6 +121,8 @@ class DataFormattingTests(unittest.TestCase):
         self.assertEqual(main.format_metric(True, "%"), "-")
         self.assertEqual(main.format_wind_direction("360"), "pohjoinen")
         self.assertEqual(main.format_wind_direction(float("inf")), "-")
+        self.assertEqual(main.format_metric(10 ** 400, "%"), "-")
+        self.assertEqual(main.resolve_weather_style(10 ** 400).icon_key, "unknown")
 
     def test_open_meteo_time_parser_accepts_seconds_and_timezone(self) -> None:
         self.assertEqual(
@@ -341,6 +343,24 @@ class SettingsAndShortcutTests(unittest.TestCase):
             self.assertEqual(json.loads(settings_path.read_text(encoding="utf-8")), original)
             self.assertEqual(list(settings_path.parent.glob(".*.tmp")), [])
 
+    def test_malformed_settings_do_not_prevent_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            settings_path = Path(temporary_dir) / "settings.json"
+            with patch.object(main, "SETTINGS_PATH", settings_path):
+                defaults = main.load_settings()
+                for payload in (b"\xff\xfe", b"[]", b"{broken", b"[" * 2000 + b"]" * 2000):
+                    with self.subTest(payload=payload):
+                        settings_path.write_bytes(payload)
+                        self.assertEqual(main.load_settings(), defaults)
+                for value in ([], {}, False, 12, None):
+                    with self.subTest(value=value):
+                        settings_path.write_text(json.dumps({
+                            "city": "Helsinki",
+                            "temperature_unit": value,
+                            "popup_theme": value,
+                        }), encoding="utf-8")
+                        self.assertEqual(main.load_settings(), {**defaults, "city": "Helsinki"})
+
     def test_desktop_shortcut_uses_redirected_windows_desktop(self) -> None:
         class RegistryKey:
             def __enter__(self):
@@ -457,19 +477,37 @@ class SettingsAndShortcutTests(unittest.TestCase):
 
         self.assertIn("-NonInteractive", run.call_args.args[0])
 
-    def test_source_restart_uses_stable_windowless_launcher(self) -> None:
-        wscript_path = Path(r"C:\Windows\System32\wscript.exe")
-        with (
-            patch.object(main, "IS_FROZEN", False),
-            patch.object(main, "_resolve_wscript_executable", return_value=wscript_path),
-            patch.object(main.subprocess, "Popen") as popen,
-        ):
-            main.restart_application()
+    def test_source_restart_keeps_the_working_python_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            python = Path(temporary_dir) / "venv" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            pythonw = python.with_name("pythonw.exe")
+            for windowless in (False, True):
+                with self.subTest(windowless=windowless):
+                    if windowless:
+                        pythonw.touch()
+                    with (
+                        patch.object(main, "IS_FROZEN", False),
+                        patch.object(main.sys, "executable", str(python)),
+                        patch.object(main.subprocess, "Popen") as popen,
+                    ):
+                        process = main.restart_application()
+                    expected = pythonw if windowless and main.os.name == "nt" else python
+                    self.assertEqual(popen.call_args.args[0], [str(expected), str(main.PROJECT_DIR / "main.py")])
+                    self.assertIs(process, popen.return_value)
 
-        self.assertEqual(
-            popen.call_args.args[0],
-            [str(wscript_path), str((main.PROJECT_DIR / "start_weather_app.vbs").resolve())],
-        )
+    def test_startup_repair_does_not_undo_a_later_disable(self) -> None:
+        widget = object.__new__(main.WeatherWidget)
+        widget._start_background_worker = Mock()
+        with (
+            patch.object(main, "is_startup_enabled", side_effect=[True, False]),
+            patch.object(main, "set_startup_enabled") as set_enabled,
+        ):
+            widget._refresh_startup_shortcut_if_enabled()
+            worker = widget._start_background_worker.call_args.args[0]
+            worker()
+        set_enabled.assert_not_called()
 
     def test_startup_paths_include_current_and_legacy_installer_names(self) -> None:
         appdata = Path(r"C:\Users\Example\AppData\Roaming")
@@ -561,6 +599,7 @@ class UpdateSafetyTests(unittest.TestCase):
             main._run_git_command(["status", "--porcelain"])
 
         self.assertEqual(run.call_args.kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(run.call_args.kwargs["env"]["GCM_INTERACTIVE"], "Never")
 
     def test_update_status_fetches_origin_main_and_reports_fast_forward(self) -> None:
         inside_worktree = subprocess.CompletedProcess([], 0, stdout="true\n", stderr="")
@@ -607,8 +646,8 @@ class UpdateSafetyTests(unittest.TestCase):
         with patch.object(
             main,
             "_git_output",
-            side_effect=["main", "", "", "local-sha", "local-sha"],
-        ), patch.object(
+            side_effect=["main", ""],
+        ) as git_output, patch.object(
             main,
             "_run_git_command",
             return_value=subprocess.CompletedProcess([], 0, stdout="true\n", stderr=""),
@@ -624,6 +663,26 @@ class UpdateSafetyTests(unittest.TestCase):
             status = main.check_github_update_status()
 
         self.assertEqual(status["state"], "restart_available")
+        self.assertEqual(git_output.call_count, 2)
+
+    def test_runtime_signature_tracks_assets_but_not_documentation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            (root / "main.py").write_text("pass", encoding="utf-8")
+            assets = root / "assets"
+            assets.mkdir()
+            icon = assets / "sun.png"
+            with patch.object(main, "PROJECT_DIR", root), patch.object(main, "IS_FROZEN", False):
+                original = main._runtime_file_signature()
+                (root / "README.md").write_text("docs", encoding="utf-8")
+                self.assertEqual(main._runtime_file_signature(), original)
+                icon.write_bytes(b"image")
+                added = main._runtime_file_signature()
+                self.assertNotEqual(added, original)
+                icon.write_bytes(b"changed image")
+                self.assertNotEqual(main._runtime_file_signature(), added)
+                icon.unlink()
+                self.assertEqual(main._runtime_file_signature(), original)
 
     def test_update_status_handles_non_repository_and_git_comparison_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir, patch.object(
@@ -694,6 +753,144 @@ class UpdateSafetyTests(unittest.TestCase):
                 main.apply_github_update()
 
         run_git.assert_not_called()
+
+
+class UpdateLifecycleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.widget = object.__new__(main.WeatherWidget)
+        self.widget.update_check_in_progress = True
+        self.widget.status_var = Mock()
+        self.widget._start_background_worker = Mock()
+        self.widget._call_on_ui_thread = lambda callback: callback()
+        self.widget.after = Mock(return_value="restart-job")
+        self.widget.destroy = Mock()
+
+    def test_update_stays_exclusive_through_confirmation_and_restart(self) -> None:
+        widget = self.widget
+
+        def confirm(*_args):
+            widget.check_for_app_update(manual=True)
+            widget._start_background_worker.assert_not_called()
+            return True
+
+        process = Mock()
+        process.poll.return_value = None
+        with (
+            patch.object(main.messagebox, "askyesno", side_effect=confirm),
+            patch.object(main, "apply_github_update") as apply_update,
+            patch.object(main, "restart_application", return_value=process),
+        ):
+            widget._handle_update_check_result({"state": "available"}, True)
+            self.assertTrue(widget.update_check_in_progress)
+            widget.check_for_app_update(manual=True)
+            widget._start_background_worker.assert_called_once()
+            widget._start_background_worker.call_args.args[0]()
+            apply_update.assert_called_once()
+            self.assertTrue(widget.update_check_in_progress)
+            widget.destroy.assert_not_called()
+            widget.after.call_args.args[1]()
+        widget.destroy.assert_called_once()
+
+    def test_declining_either_update_action_releases_the_guard(self) -> None:
+        for state in ("available", "restart_available"):
+            with self.subTest(state=state), patch.object(main.messagebox, "askyesno", return_value=False):
+                self.widget.update_check_in_progress = True
+                self.widget._handle_update_check_result({"state": state}, True)
+                self.assertFalse(self.widget.update_check_in_progress)
+        self.widget._start_background_worker.assert_not_called()
+
+    def test_failed_update_is_visible_and_keeps_the_current_app_alive(self) -> None:
+        with (
+            patch.object(main.messagebox, "showerror") as show_error,
+            patch.object(main, "restart_application") as restart,
+        ):
+            self.widget._finish_app_update("network failed")
+        show_error.assert_called_once()
+        restart.assert_not_called()
+        self.widget.destroy.assert_not_called()
+        self.assertFalse(self.widget.update_check_in_progress)
+
+    def test_failed_restart_spawn_keeps_the_current_app_alive(self) -> None:
+        with (
+            patch.object(main.messagebox, "showerror") as show_error,
+            patch.object(main, "restart_application", side_effect=OSError("missing executable")),
+        ):
+            self.widget._finish_app_update(None)
+        show_error.assert_called_once()
+        self.widget.after.assert_not_called()
+        self.widget.destroy.assert_not_called()
+        self.assertFalse(self.widget.update_check_in_progress)
+
+    def test_early_child_exit_keeps_the_current_app_alive(self) -> None:
+        for exit_code in (0, 1):
+            with self.subTest(exit_code=exit_code):
+                self.widget.update_check_in_progress = True
+                process = Mock()
+                process.poll.return_value = exit_code
+                with patch.object(main.messagebox, "showerror") as show_error:
+                    self.widget._check_restart_process(process)
+                show_error.assert_called_once()
+                self.widget.destroy.assert_not_called()
+                self.assertFalse(self.widget.update_check_in_progress)
+
+
+class WeatherResultTests(unittest.TestCase):
+    def test_completed_fetch_preserves_a_new_city_being_typed(self) -> None:
+        for entry, expected in (("Helsinki", "Helsinki"), ("", ""), ("  espoo  ", "Espoo")):
+            with self.subTest(entry=entry):
+                widget = object.__new__(main.WeatherWidget)
+                widget.unit_symbol = "C"
+                widget.settings = {"city": "Espoo"}
+                widget.city_var = Mock()
+                widget.detail_city_var = Mock()
+                widget.detail_city_var.get.return_value = entry
+                widget.startup_var = Mock()
+                widget.status_var = Mock()
+                widget.popup_bg_canvas = Mock()
+                widget.footer_label = 1
+                widget._apply_current_weather_summary = Mock()
+                widget._apply_today_detail_metrics = Mock()
+                widget._apply_forecast_cards = Mock()
+                widget._update_tray_symbol = Mock()
+                widget._schedule_refresh = Mock()
+                widget._run_pending_city_search = Mock()
+                weather = {
+                    "current": {"weather_code": 3, "temperature_2m": 18},
+                    "daily": {"time": ["2026-09-02"]},
+                }
+                with patch.object(main, "is_startup_enabled", return_value=False):
+                    widget._apply_weather({"name": "Espoo"}, weather, "espoo")
+                widget.city_var.set.assert_called_once_with("Espoo")
+                self.assertIs(widget.latest_weather, weather)
+                self.assertFalse(widget.fetch_in_progress)
+                if entry == expected:
+                    widget.detail_city_var.set.assert_not_called()
+                else:
+                    widget.detail_city_var.set.assert_called_once_with(expected)
+
+    def test_pending_search_uses_the_most_recent_request(self) -> None:
+        widget = object.__new__(main.WeatherWidget)
+        widget.fetch_in_progress = True
+        widget.status_var = Mock()
+        widget._is_destroying = False
+        widget.after_idle = Mock()
+        widget.refresh_weather("Turku")
+        widget.refresh_weather("Tampere")
+        self.assertEqual(widget.pending_city_search, "Tampere")
+        widget._run_pending_city_search()
+        self.assertIsNone(widget.pending_city_search)
+        widget.refresh_weather = Mock()
+        widget.after_idle.call_args.args[0]()
+        widget.refresh_weather.assert_called_once_with("Tampere")
+
+    def test_clock_moving_backwards_does_not_keep_old_weather_fresh(self) -> None:
+        widget = object.__new__(main.WeatherWidget)
+        widget.fetch_in_progress = False
+        widget.latest_weather = {"current": {}}
+        widget.refresh_weather = Mock()
+        widget.last_weather_update = main.datetime.now() + main.timedelta(hours=1)
+        widget._ensure_fresh_weather()
+        widget.refresh_weather.assert_called_once()
 
 
 class ThreadDispatchTests(unittest.TestCase):

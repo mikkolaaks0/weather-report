@@ -62,6 +62,42 @@ function Assert-SafeInstallDirectory {
     }
 }
 
+function Stop-InstalledApplication {
+    param([string]$ExecutablePath)
+
+    $target = Normalize-PathForSafety $ExecutablePath
+    foreach ($process in @(Get-Process -Name 'WeatherReport' -ErrorAction SilentlyContinue)) {
+        if ($process.Path -and (Normalize-PathForSafety $process.Path) -eq $target) {
+            if (-not $process.HasExited) {
+                Stop-Process -InputObject $process -Force
+                if (-not $process.WaitForExit(10000)) {
+                    throw "The installed application did not exit: $target"
+                }
+            }
+        }
+    }
+}
+
+function Remove-InstalledShortcut {
+    param([string]$Path, [string]$ExecutablePath)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return
+    }
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($Path)
+        $target = Normalize-PathForSafety $shortcut.TargetPath
+    }
+    catch {
+        Write-Warning "Could not inspect shortcut; leaving it unchanged: $Path"
+        return
+    }
+    if ($target -eq (Normalize-PathForSafety $ExecutablePath)) {
+        Remove-Item -LiteralPath $Path -Force
+    }
+}
+
 $appName = 'Weather Report'
 $settingsRoot = if ($env:APPDATA) { $env:APPDATA } else { $env:LOCALAPPDATA }
 $settingDir = if ($settingsRoot) { Join-Path $settingsRoot 'weather-report' } else { $null }
@@ -77,12 +113,11 @@ $InstallDir = Normalize-PathForSafety $InstallDir
 
 Write-Host "Uninstalling $appName..."
 
-Get-Process -Name 'WeatherReport' -ErrorAction SilentlyContinue | Stop-Process -Force
+$exePath = Join-Path $InstallDir 'WeatherReport.exe'
+Stop-InstalledApplication -ExecutablePath $exePath
 
 foreach ($shortcutPath in $shortcutPaths) {
-    if (Test-Path -LiteralPath $shortcutPath) {
-        Remove-Item -LiteralPath $shortcutPath -Force
-    }
+    Remove-InstalledShortcut -Path $shortcutPath -ExecutablePath $exePath
 }
 
 if (Test-Path -LiteralPath $InstallDir) {
