@@ -1332,7 +1332,7 @@ class WeatherWidget(tk.Tk):
         self.detail_city_var = tk.StringVar(value=self.city_var.get())
         self.status_var = tk.StringVar(value="Päivitetään säätä...")
         self.clock_var = tk.StringVar(value="--")
-        self.startup_var = tk.BooleanVar(value=is_startup_enabled())
+        self.startup_change_in_progress = False
         initial_theme_id = self.settings.get("popup_theme", DEFAULT_POPUP_THEME)
         self.popup_theme_id = self._resolve_popup_theme_id(initial_theme_id)
         self.settings["popup_theme"] = self.popup_theme_id
@@ -1515,11 +1515,34 @@ class WeatherWidget(tk.Tk):
         self.tray_icon = None
 
     def _toggle_startup_from_tray(self) -> None:
+        if self.startup_change_in_progress:
+            return
         desired_state = not is_startup_enabled()
-        self.startup_var.set(desired_state)
-        self._toggle_startup()
+        self.startup_change_in_progress = True
+        self.status_var.set("Päivitetään käynnistysasetusta...")
+
+        def worker() -> None:
+            error_text = None
+            try:
+                set_startup_enabled(desired_state)
+            except Exception as error:  # noqa: BLE001
+                error_text = str(error)
+            self._call_on_ui_thread(lambda: self._finish_startup_change(error_text))
+
+        self._start_background_worker(worker)
+
+    def _finish_startup_change(self, error_text: str | None) -> None:
+        self.startup_change_in_progress = False
         if self.tray_icon:
             self.tray_icon.update_menu()
+        if error_text:
+            message = f"Käynnistysasetuksen päivitys epäonnistui: {error_text}"
+            self.status_var.set(message)
+            messagebox.showerror(APP_NAME, message)
+        elif is_startup_enabled():
+            self.status_var.set("Automaattinen käynnistys päällä. Toteutus on kevyt Startup-pikakuvake.")
+        else:
+            self.status_var.set("Automaattinen käynnistys poistettu käytöstä.")
 
     def _create_desktop_shortcut_from_tray(self) -> None:
         try:
@@ -2450,20 +2473,6 @@ class WeatherWidget(tk.Tk):
         if age < timedelta(0) or age > timedelta(minutes=FRESH_WEATHER_MAX_AGE_MINUTES):
             self.refresh_weather()
 
-    def _toggle_startup(self) -> None:
-        desired_state = self.startup_var.get()
-        try:
-            set_startup_enabled(desired_state)
-        except Exception as error:  # noqa: BLE001
-            self.startup_var.set(not desired_state)
-            messagebox.showerror(APP_NAME, f"Käynnistysasetuksen päivitys epäonnistui: {error}")
-            return
-
-        if desired_state:
-            self.status_var.set("Automaattinen käynnistys päällä. Toteutus on kevyt Startup-pikakuvake.")
-        else:
-            self.status_var.set("Automaattinen käynnistys poistettu käytöstä.")
-
     def _search_from_popup(self) -> None:
         self.refresh_weather(self.detail_city_var.get())
 
@@ -2542,6 +2551,8 @@ class WeatherWidget(tk.Tk):
             return
 
         self.fetch_in_progress = True
+        if city_override is not None:
+            self.pending_city_search = None
         self.status_var.set(f"Haetaan säätä: {city}")
         temperature_unit = self.settings.get("temperature_unit", "celsius")
         place_hint = self.latest_place if city_override is None else None
@@ -2613,7 +2624,7 @@ class WeatherWidget(tk.Tk):
         if not city or self._is_destroying:
             return
         self.pending_city_search = None
-        self.after_idle(lambda city=city: self.refresh_weather(city))
+        self.refresh_weather(city)
 
     def _schedule_refresh(self) -> None:
         if self.refresh_job is not None:
@@ -2803,8 +2814,6 @@ class WeatherWidget(tk.Tk):
         self._update_tray_symbol(style.icon_key, f"{city_text}: {current_temp} {style.label}")
         if _normalize_city_query(self.detail_city_var.get()).casefold() == requested_city_text.casefold():
             self.detail_city_var.set(normalized_city)
-        self.startup_var.set(is_startup_enabled())
-
         self._apply_forecast_cards(daily)
 
         self.popup_bg_canvas.itemconfigure(self.footer_label, text=FOOTER_TEXT)

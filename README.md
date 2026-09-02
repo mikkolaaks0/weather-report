@@ -11,11 +11,11 @@ from the system tray.
 - Bundled Fluent-style weather icons for the tray, card, and forecast panel
 - Bundled metric icons for rain amount, rain probability, humidity, and wind rows
 - Bundled Exo 2 app font; no separate font installation is required
-- City search with saved settings
+- City search with saved settings; the latest submitted search takes precedence
 - Temperature, daily high/low, precipitation, humidity, wind, sunrise and sunset
 - Near-term precipitation probability based on the next 6 hours
 - Automatic weather refresh every 30 minutes
-- Optional startup shortcut for Windows login
+- Optional startup shortcut for Windows login, updated without blocking the popup
 - Automatic startup check and manual tray update check when running from a Git checkout
 
 ## Requirements
@@ -55,6 +55,11 @@ startup shortcut is preserved and rewritten to the current executable path.
 Downloads have time limits, and the installer stops only the executable inside
 the installation being replaced. The old startup shortcut is removed only after
 the replacement has been saved successfully.
+Core Python/Tk runtime files are checked before stopping the current app. If an
+installation step fails after replacement, recovery restores the previous app
+directory and the original desktop, Start Menu, and startup shortcuts, including
+removing shortcuts that were created by the failed attempt. Recovery errors are
+reported rather than treated as a successful installation.
 
 To uninstall the portable install:
 
@@ -120,7 +125,8 @@ manifest. On Windows, the suite also creates and inspects temporary `.lnk` files
 and renders a hidden Tk popup. Temporary local Git repositories exercise actual
 update, restart-detection, and conflict paths without contacting GitHub. Installer
 process selection and release-source checks run in isolation: the suite does not
-run the installer or modify the user's startup shortcuts.
+install the app or modify the user's startup shortcuts. The installer's failure
+handler is exercised using temporary program directories and shortcut snapshots.
 
 ## Bundled Assets
 

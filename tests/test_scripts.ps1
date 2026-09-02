@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
-function Get-ScriptFunctions {
+function Get-ScriptAst {
     param([string]$Name)
 
     $tokens = $null
@@ -12,6 +12,13 @@ function Get-ScriptFunctions {
     if ($parseErrors.Count) {
         throw "$Name contains syntax errors: $($parseErrors.Message -join '; ')"
     }
+    return $ast
+}
+
+function Get-ScriptFunctions {
+    param([string]$Name)
+
+    $ast = Get-ScriptAst $Name
     # Load only definitions: never execute installer downloads or process termination.
     $definitions = $ast.FindAll({
         param($node)
@@ -78,6 +85,83 @@ try {
         Remove-InstalledShortcut -Path $shortcutPath -ExecutablePath $target
         Assert-True (-not (Test-Path -LiteralPath $shortcutPath)) 'Owned shortcut was not removed'
         Remove-InstalledShortcut -Path $shortcutPath -ExecutablePath $target
+    }
+
+    & {
+        . (Get-ScriptFunctions 'install.ps1')
+        $package = Join-Path $testDir 'package'
+        New-Item -ItemType Directory -Path $package | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $package 'WeatherReport.exe'), 'placeholder')
+        $rejected = $false
+        try { Assert-PortablePackage $package } catch { $rejected = $true }
+        Assert-True $rejected 'An executable without its Tk runtime was accepted'
+        foreach ($relativePath in @(
+            '_internal\_tkinter.pyd',
+            '_internal\_tcl_data\init.tcl',
+            '_internal\_tk_data\tk.tcl'
+        )) {
+            $path = Join-Path $package $relativePath
+            New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+            [System.IO.File]::WriteAllText($path, 'placeholder')
+        }
+        $rejected = $false
+        try { Assert-PortablePackage $package } catch { $rejected = $true }
+        Assert-True $rejected 'A package without Python was accepted'
+        [System.IO.File]::WriteAllText((Join-Path $package '_internal\python313.dll'), 'placeholder')
+        # Released v0.1.1 lacks the later weather icon library but must remain installable.
+        Assert-PortablePackage $package
+
+        # Exercise the installer's actual failure handler, without running downloads or launchers.
+        $ast = Get-ScriptAst 'install.ps1'
+        $transaction = $ast.EndBlock.Statements | Where-Object {
+            $_ -is [System.Management.Automation.Language.TryStatementAst]
+        } | Select-Object -Last 1
+        Assert-True ($null -ne $transaction) 'Installer transaction was not found'
+        $rollback = [scriptblock]::Create(($transaction.CatchClauses[0].Body.Statements |
+            ForEach-Object { $_.Extent.Text }) -join "`n")
+
+        foreach ($hadExistingInstall in @($false, $true)) {
+            $caseDir = Join-Path $testDir "rollback-$hadExistingInstall"
+            $InstallDir = [System.IO.Path]::GetFullPath((Join-Path $caseDir 'WeatherReport'))
+            $backupDir = "$InstallDir.backup-test"
+            foreach ($target in @($InstallDir, $backupDir)) {
+                Assert-True ($target.StartsWith("$testDir\", [System.StringComparison]::OrdinalIgnoreCase)) 'Unsafe rollback test path'
+            }
+            Assert-SafeInstallDirectory $InstallDir
+            New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $InstallDir 'new.txt'), 'new version')
+            if ($hadExistingInstall) {
+                New-Item -ItemType Directory -Path $backupDir | Out-Null
+                [System.IO.File]::WriteAllText((Join-Path $backupDir 'old.txt'), 'old version')
+            }
+            $changed = Join-Path $caseDir 'desktop.lnk'
+            $removed = Join-Path $caseDir 'legacy-startup.lnk'
+            $created = Join-Path $caseDir 'new-start-menu.lnk'
+            [System.IO.File]::WriteAllText($changed, 'original desktop shortcut')
+            [System.IO.File]::WriteAllText($removed, 'original startup shortcut')
+            $shortcutSnapshot = @(Get-ShortcutSnapshot @($changed, $removed, $created))
+            [System.IO.File]::WriteAllText($changed, 'replacement shortcut')
+            Remove-Item -LiteralPath $removed
+            [System.IO.File]::WriteAllText($created, 'new shortcut')
+            $newInstallActivated = $true
+            $caught = $false
+            try {
+                try { throw 'simulated launch failure' }
+                catch { & $rollback }
+            }
+            catch { $caught = $_.Exception.Message -eq 'simulated launch failure' }
+            Assert-True $caught 'Rollback did not preserve the original failure'
+            Assert-True ([System.IO.File]::ReadAllText($changed) -eq 'original desktop shortcut') 'Desktop shortcut was not restored'
+            Assert-True ([System.IO.File]::ReadAllText($removed) -eq 'original startup shortcut') 'Legacy startup shortcut was not restored'
+            Assert-True (-not (Test-Path -LiteralPath $created)) 'Failed first install left a new shortcut behind'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'new.txt'))) 'Failed installation was not removed'
+            if ($hadExistingInstall) {
+                Assert-True ([System.IO.File]::ReadAllText((Join-Path $InstallDir 'old.txt')) -eq 'old version') 'Previous application was not restored'
+            }
+            else {
+                Assert-True (-not (Test-Path -LiteralPath $InstallDir)) 'Failed first install left its directory behind'
+            }
+        }
     }
 
     & {

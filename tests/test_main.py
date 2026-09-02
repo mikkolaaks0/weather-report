@@ -519,6 +519,46 @@ class SettingsAndShortcutTests(unittest.TestCase):
 
 
 class TrayMenuTests(unittest.TestCase):
+    def test_startup_change_runs_off_ui_thread_and_ignores_duplicate_clicks(self) -> None:
+        widget = object.__new__(main.WeatherWidget)
+        widget.startup_change_in_progress = False
+        widget.status_var = Mock()
+        widget.tray_icon = Mock()
+        widget._start_background_worker = Mock()
+        widget._call_on_ui_thread = Mock()
+        with (
+            patch.object(main, "is_startup_enabled", return_value=False),
+            patch.object(main, "set_startup_enabled") as set_enabled,
+        ):
+            widget._toggle_startup_from_tray()
+            widget._toggle_startup_from_tray()
+            self.assertTrue(widget.startup_change_in_progress)
+            widget._start_background_worker.assert_called_once()
+            set_enabled.assert_not_called()
+            widget._start_background_worker.call_args.args[0]()
+            set_enabled.assert_called_once_with(True)
+            widget.tray_icon.update_menu.assert_not_called()
+            widget._call_on_ui_thread.call_args.args[0]()
+        self.assertFalse(widget.startup_change_in_progress)
+        widget.tray_icon.update_menu.assert_called_once()
+
+    def test_failed_startup_change_releases_guard_and_reports_error(self) -> None:
+        widget = object.__new__(main.WeatherWidget)
+        widget.startup_change_in_progress = False
+        widget.status_var = Mock()
+        widget.tray_icon = Mock()
+        widget._start_background_worker = lambda callback: callback()
+        widget._call_on_ui_thread = lambda callback: callback()
+        with (
+            patch.object(main, "is_startup_enabled", return_value=True),
+            patch.object(main, "set_startup_enabled", side_effect=OSError("access denied")),
+            patch.object(main.messagebox, "showerror") as show_error,
+        ):
+            widget._toggle_startup_from_tray()
+        self.assertFalse(widget.startup_change_in_progress)
+        show_error.assert_called_once()
+        widget.tray_icon.update_menu.assert_called_once()
+
     def test_source_tray_menu_exposes_and_dispatches_all_actions(self) -> None:
         class FakeMenuItem:
             def __init__(self, text, action, **kwargs):
@@ -835,6 +875,32 @@ class UpdateLifecycleTests(unittest.TestCase):
 
 
 class WeatherResultTests(unittest.TestCase):
+    def test_pending_search_cannot_overtake_a_newer_request(self) -> None:
+        widget = object.__new__(main.WeatherWidget)
+        widget.fetch_in_progress = False
+        widget.pending_city_search = "Turku"
+        widget._is_destroying = False
+        widget.status_var = Mock()
+        widget.settings = {}
+        widget._start_background_worker = Mock()
+        idle_callbacks = []
+        widget.after_idle = idle_callbacks.append
+        widget._run_pending_city_search()
+        widget.refresh_weather("Helsinki")
+        for callback in idle_callbacks:
+            callback()
+        self.assertEqual(widget.pending_city_search, "Helsinki")
+
+    def test_new_search_discards_older_pending_search(self) -> None:
+        widget = object.__new__(main.WeatherWidget)
+        widget.fetch_in_progress = False
+        widget.pending_city_search = "Turku"
+        widget.status_var = Mock()
+        widget.settings = {}
+        widget._start_background_worker = Mock()
+        widget.refresh_weather("Helsinki")
+        self.assertIsNone(widget.pending_city_search)
+
     def test_completed_fetch_preserves_a_new_city_being_typed(self) -> None:
         for entry, expected in (("Helsinki", "Helsinki"), ("", ""), ("  espoo  ", "Espoo")):
             with self.subTest(entry=entry):
@@ -844,7 +910,6 @@ class WeatherResultTests(unittest.TestCase):
                 widget.city_var = Mock()
                 widget.detail_city_var = Mock()
                 widget.detail_city_var.get.return_value = entry
-                widget.startup_var = Mock()
                 widget.status_var = Mock()
                 widget.popup_bg_canvas = Mock()
                 widget.footer_label = 1
@@ -873,14 +938,12 @@ class WeatherResultTests(unittest.TestCase):
         widget.fetch_in_progress = True
         widget.status_var = Mock()
         widget._is_destroying = False
-        widget.after_idle = Mock()
         widget.refresh_weather("Turku")
         widget.refresh_weather("Tampere")
         self.assertEqual(widget.pending_city_search, "Tampere")
+        widget.refresh_weather = Mock()
         widget._run_pending_city_search()
         self.assertIsNone(widget.pending_city_search)
-        widget.refresh_weather = Mock()
-        widget.after_idle.call_args.args[0]()
         widget.refresh_weather.assert_called_once_with("Tampere")
 
     def test_clock_moving_backwards_does_not_keep_old_weather_fresh(self) -> None:

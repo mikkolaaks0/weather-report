@@ -124,6 +124,65 @@ function New-Shortcut {
     $shortcut.Save()
 }
 
+function Get-ShortcutSnapshot {
+    param([string[]]$Paths)
+
+    foreach ($path in ($Paths | Select-Object -Unique)) {
+        $contents = $null
+        if (Test-Path -LiteralPath $path) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                throw "Shortcut path is not a file: $path"
+            }
+            $contents = [System.IO.File]::ReadAllBytes($path)
+        }
+        [pscustomobject]@{ Path = $path; Contents = $contents }
+    }
+}
+
+function Restore-ShortcutSnapshot {
+    param([object[]]$Snapshot)
+
+    $failures = @()
+    foreach ($entry in $Snapshot) {
+        try {
+            if ($null -ne $entry.Contents) {
+                [System.IO.File]::WriteAllBytes($entry.Path, $entry.Contents)
+            }
+            elseif (Test-Path -LiteralPath $entry.Path -PathType Leaf) {
+                Remove-Item -LiteralPath $entry.Path -Force
+            }
+        }
+        catch {
+            $failures += "$($entry.Path): $($_.Exception.Message)"
+        }
+    }
+    if ($failures.Count) {
+        throw "Could not restore shortcuts: $($failures -join '; ')"
+    }
+}
+
+function Assert-PortablePackage {
+    param([string]$Directory)
+
+    $requiredFiles = @(
+        'WeatherReport.exe',
+        '_internal\_tkinter.pyd',
+        '_internal\_tcl_data\init.tcl',
+        '_internal\_tk_data\tk.tcl'
+    )
+    foreach ($relativePath in $requiredFiles) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Directory $relativePath) -PathType Leaf)) {
+            throw "The downloaded package is incomplete: $relativePath"
+        }
+    }
+    $pythonRuntime = Get-ChildItem -LiteralPath (Join-Path $Directory '_internal') -Filter 'python3*.dll' -File |
+        Where-Object { $_.Name -match '^python3\d+\.dll$' } |
+        Select-Object -First 1
+    if (-not $pythonRuntime) {
+        throw 'The downloaded package is missing the Python runtime.'
+    }
+}
+
 function Get-LatestRelease {
     $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ 'User-Agent' = 'WeatherReport-Installer' } -TimeoutSec 30
     return $release
@@ -180,6 +239,7 @@ Write-Host "Installing $appName..."
 
 New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
 $newInstallActivated = $false
+$shortcutSnapshot = @()
 try {
 Assert-SafeInstallDirectory -Path $InstallDir
 $InstallDir = Normalize-PathForSafety $InstallDir
@@ -200,6 +260,21 @@ if (-not $stagedExePath) {
     throw "$exeName was not found in the downloaded package."
 }
 $stagedAppDir = Split-Path -Parent $stagedExePath
+Assert-PortablePackage -Directory $stagedAppDir
+
+$shortcutPaths = @()
+if (-not $NoStartMenuShortcut) {
+    $startMenuShortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) "$appName.lnk"
+    $shortcutPaths += $startMenuShortcutPath
+}
+if (-not $NoDesktopShortcut) {
+    $desktopShortcutPath = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) "$appName.lnk"
+    $shortcutPaths += $desktopShortcutPath
+}
+if ($Startup -or $startupWasEnabled) {
+    $shortcutPaths += @($startupShortcutPath, $legacyStartupShortcutPath)
+}
+$shortcutSnapshot = @(Get-ShortcutSnapshot -Paths $shortcutPaths)
 
 Stop-InstalledApplication -ExecutablePath (Join-Path $InstallDir $exeName)
 Write-Host "Extracting to $InstallDir..."
@@ -237,18 +312,16 @@ if (-not $iconPath) {
 }
 
 if (-not $NoStartMenuShortcut) {
-    $programs = [Environment]::GetFolderPath('Programs')
     New-Shortcut `
-        -Path (Join-Path $programs "$appName.lnk") `
+        -Path $startMenuShortcutPath `
         -Target $exePath `
         -WorkingDirectory $appDir `
         -Icon $iconPath
 }
 
 if (-not $NoDesktopShortcut) {
-    $desktop = [Environment]::GetFolderPath('DesktopDirectory')
     New-Shortcut `
-        -Path (Join-Path $desktop "$appName.lnk") `
+        -Path $desktopShortcutPath `
         -Target $exePath `
         -WorkingDirectory $appDir `
         -Icon $iconPath
@@ -294,6 +367,12 @@ catch {
         }
         catch {
             Write-Warning "Installation failed and the previous version could not be fully restored: $($_.Exception.Message)"
+        }
+        try {
+            Restore-ShortcutSnapshot -Snapshot $shortcutSnapshot
+        }
+        catch {
+            Write-Warning "Installation failed and shortcuts could not be fully restored: $($_.Exception.Message)"
         }
     }
     throw $installError
