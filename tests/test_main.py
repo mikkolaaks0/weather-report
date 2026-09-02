@@ -213,9 +213,17 @@ class ServicePayloadTests(unittest.TestCase):
         self.assertEqual(request.get_header("Accept"), "application/json")
         self.assertEqual(request.get_header("User-agent"), f"{main.APP_SLUG}-desktop")
 
-        with patch.object(main, "urlopen", return_value=Response(b"[]")):
-            with self.assertRaises(main.WeatherServiceError):
-                main._get_json("https://example.invalid", {})
+        invalid_payloads = (
+            b"[]",
+            b'{"broken":',
+            b"\xff",
+            b'{"nested":' * 10000 + b"null" + b"}" * 10000,
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload_length=len(payload)):
+                with patch.object(main, "urlopen", return_value=Response(payload)):
+                    with self.assertRaises(main.WeatherServiceError):
+                        main._get_json("https://example.invalid", {})
 
         with (
             patch.object(main, "MAX_JSON_RESPONSE_BYTES", 8),
@@ -337,11 +345,24 @@ class SettingsAndShortcutTests(unittest.TestCase):
             settings_path = Path(temporary_dir) / "weather_settings.json"
             original = {"city": "Espoo", "temperature_unit": "celsius"}
             with patch.object(main, "SETTINGS_PATH", settings_path):
-                main.save_settings(original)
-                main.save_settings({"city": object()})
+                self.assertIs(main.save_settings(original), True)
+                self.assertIs(main.save_settings({"city": object()}), False)
 
             self.assertEqual(json.loads(settings_path.read_text(encoding="utf-8")), original)
             self.assertEqual(list(settings_path.parent.glob(".*.tmp")), [])
+
+    def test_failed_settings_replacement_preserves_original_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            path = Path(temporary_dir) / "settings.json"
+            with patch.object(main, "SETTINGS_PATH", path):
+                self.assertTrue(main.save_settings({"city": "Espoo"}))
+                original = path.read_bytes()
+                with patch.object(main.os, "replace", side_effect=PermissionError("file locked")):
+                    self.assertFalse(main.save_settings({"city": "Helsinki"}))
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(list(path.parent.glob(".*.tmp")), [])
+                self.assertTrue(main.save_settings({"city": "Helsinki"}))
+                self.assertEqual(main.load_settings()["city"], "Helsinki")
 
     def test_malformed_settings_do_not_prevent_startup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -471,11 +492,22 @@ class SettingsAndShortcutTests(unittest.TestCase):
                     "_resolve_shortcut_target",
                     return_value=("target.exe", "", temporary_dir, "target.exe"),
                 ),
-                patch.object(main.subprocess, "run") as run,
+                patch.object(main.subprocess, "run", side_effect=lambda *_args, **_kwargs: shortcut_path.touch()) as run,
             ):
                 main.create_windows_shortcut(shortcut_path)
 
         self.assertIn("-NonInteractive", run.call_args.args[0])
+
+    def test_shortcut_creation_rejects_missing_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            shortcut_path = Path(temporary_dir) / "Weather Report.lnk"
+            with (
+                patch.object(main.shutil, "which", return_value="powershell.exe"),
+                patch.object(main, "_resolve_shortcut_target", return_value=("target.exe", "", temporary_dir, "target.exe")),
+                patch.object(main.subprocess, "run"),
+            ):
+                with self.assertRaises(OSError):
+                    main.create_windows_shortcut(shortcut_path)
 
     def test_source_restart_keeps_the_working_python_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -519,6 +551,49 @@ class SettingsAndShortcutTests(unittest.TestCase):
 
 
 class TrayMenuTests(unittest.TestCase):
+    def test_desktop_shortcut_failure_allows_retry(self) -> None:
+        widget = object.__new__(main.WeatherWidget)
+        widget.desktop_shortcut_in_progress = False
+        widget.status_var = Mock()
+        widget._start_background_worker = lambda callback: callback()
+        widget._call_on_ui_thread = lambda callback: callback()
+        with (
+            patch.object(main, "create_desktop_shortcut", side_effect=[
+                OSError("access denied"), Path("Weather Report.lnk"),
+            ]) as create,
+            patch.object(main.messagebox, "showinfo") as show_info,
+            patch.object(main.messagebox, "showerror") as show_error,
+        ):
+            widget._create_desktop_shortcut_from_tray()
+            self.assertFalse(widget.desktop_shortcut_in_progress)
+            show_error.assert_called_once()
+            show_info.assert_not_called()
+            widget._create_desktop_shortcut_from_tray()
+            self.assertFalse(widget.desktop_shortcut_in_progress)
+            show_info.assert_called_once()
+            self.assertEqual(create.call_count, 2)
+
+    def test_desktop_shortcut_creation_does_not_block_ui_or_duplicate_work(self) -> None:
+        widget = object.__new__(main.WeatherWidget)
+        widget.desktop_shortcut_in_progress = False
+        widget.status_var = Mock()
+        widget._start_background_worker = Mock()
+        widget._call_on_ui_thread = Mock()
+        with (
+            patch.object(main, "create_desktop_shortcut", return_value=Path("Weather Report.lnk")) as create,
+            patch.object(main.messagebox, "showinfo") as show_info,
+        ):
+            widget._create_desktop_shortcut_from_tray()
+            widget._create_desktop_shortcut_from_tray()
+            create.assert_not_called()
+            widget._start_background_worker.assert_called_once()
+            widget._start_background_worker.call_args.args[0]()
+            create.assert_called_once()
+            show_info.assert_not_called()
+            widget._call_on_ui_thread.call_args.args[0]()
+        self.assertFalse(widget.desktop_shortcut_in_progress)
+        show_info.assert_called_once()
+
     def test_startup_change_runs_off_ui_thread_and_ignores_duplicate_clicks(self) -> None:
         widget = object.__new__(main.WeatherWidget)
         widget.startup_change_in_progress = False
@@ -875,6 +950,72 @@ class UpdateLifecycleTests(unittest.TestCase):
 
 
 class WeatherResultTests(unittest.TestCase):
+    @staticmethod
+    def make_result_widget(entry: str = "Espoo"):
+        widget = object.__new__(main.WeatherWidget)
+        widget.unit_symbol = "C"
+        widget.settings = {"city": "Espoo", "popup_theme": main.DEFAULT_POPUP_THEME}
+        widget._settings_save_pending = False
+        widget.city_var = Mock()
+        widget.detail_city_var = Mock()
+        widget.detail_city_var.get.return_value = entry
+        widget.status_var = Mock()
+        widget.popup_bg_canvas = Mock()
+        widget.footer_label = 1
+        widget._apply_current_weather_summary = Mock()
+        widget._apply_today_detail_metrics = Mock()
+        widget._apply_forecast_cards = Mock()
+        widget._update_tray_symbol = Mock()
+        widget._schedule_refresh = Mock()
+        widget._run_pending_city_search = Mock()
+        return widget
+
+    def test_settings_failure_warns_once_and_retries_with_latest_preferences(self) -> None:
+        widget = self.make_result_widget()
+        widget.popup_theme_id = main.DEFAULT_POPUP_THEME
+        widget.popup = None
+        widget._update_theme_dot_color = Mock()
+        theme = next(key for key in main.POPUP_THEMES if key != main.DEFAULT_POPUP_THEME)
+        weather = {
+            "current": {"weather_code": 3, "temperature_2m": 18},
+            "daily": {"time": ["2026-09-02"]},
+        }
+        with (
+            patch.object(main, "save_settings", side_effect=[False, False, True, False]) as save,
+            patch.object(main.messagebox, "showwarning") as warning,
+        ):
+            widget._set_popup_theme(theme)
+            self.assertEqual(widget.popup_theme_id, theme)
+            self.assertTrue(widget._settings_save_pending)
+            warning.assert_called_once()
+            widget._apply_weather({"name": "Espoo"}, weather, "Espoo")
+            self.assertTrue(widget._settings_save_pending)
+            warning.assert_called_once()
+            widget._apply_weather({"name": "Espoo"}, weather, "Espoo")
+            self.assertFalse(widget._settings_save_pending)
+            self.assertEqual(save.call_count, 3)
+            widget._apply_weather({"name": "Espoo"}, weather, "Espoo")
+            self.assertEqual(save.call_count, 3)
+            widget._apply_weather({"name": "Helsinki"}, weather, "Helsinki")
+            self.assertTrue(widget._settings_save_pending)
+            self.assertEqual(warning.call_count, 2)
+            save.assert_called_with({"city": "Helsinki", "popup_theme": theme})
+            self.assertIs(widget.latest_weather, weather)
+            self.assertFalse(widget.fetch_in_progress)
+
+    def test_pending_settings_are_retried_when_closing(self) -> None:
+        widget = self.make_result_widget()
+        widget._is_destroying = False
+        widget._settings_save_pending = True
+        widget._stop_tray_icon = Mock()
+        for job in ("clock_job", "refresh_job", "bootstrap_job", "update_job", "restart_job", "ui_poll_job"):
+            setattr(widget, job, None)
+        with patch.object(main, "save_settings", return_value=False) as save, patch.object(main.tk.Tk, "destroy") as destroy:
+            widget.destroy()
+            widget.destroy()
+        save.assert_called_once_with(widget.settings)
+        destroy.assert_called_once()
+
     def test_pending_search_cannot_overtake_a_newer_request(self) -> None:
         widget = object.__new__(main.WeatherWidget)
         widget.fetch_in_progress = False
@@ -904,21 +1045,7 @@ class WeatherResultTests(unittest.TestCase):
     def test_completed_fetch_preserves_a_new_city_being_typed(self) -> None:
         for entry, expected in (("Helsinki", "Helsinki"), ("", ""), ("  espoo  ", "Espoo")):
             with self.subTest(entry=entry):
-                widget = object.__new__(main.WeatherWidget)
-                widget.unit_symbol = "C"
-                widget.settings = {"city": "Espoo"}
-                widget.city_var = Mock()
-                widget.detail_city_var = Mock()
-                widget.detail_city_var.get.return_value = entry
-                widget.status_var = Mock()
-                widget.popup_bg_canvas = Mock()
-                widget.footer_label = 1
-                widget._apply_current_weather_summary = Mock()
-                widget._apply_today_detail_metrics = Mock()
-                widget._apply_forecast_cards = Mock()
-                widget._update_tray_symbol = Mock()
-                widget._schedule_refresh = Mock()
-                widget._run_pending_city_search = Mock()
+                widget = self.make_result_widget(entry)
                 weather = {
                     "current": {"weather_code": 3, "temperature_2m": 18},
                     "daily": {"time": ["2026-09-02"]},

@@ -599,7 +599,7 @@ def load_settings() -> dict:
     return settings
 
 
-def save_settings(settings: dict) -> None:
+def save_settings(settings: dict) -> bool:
     temporary_path = SETTINGS_PATH.with_name(f".{SETTINGS_PATH.name}.{os.getpid()}.tmp")
     try:
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -607,11 +607,13 @@ def save_settings(settings: dict) -> None:
             json.dump(settings, handle, indent=2, ensure_ascii=False)
             handle.write("\n")
         os.replace(temporary_path, SETTINGS_PATH)
+        return True
     except (OSError, TypeError, ValueError):
         try:
             temporary_path.unlink(missing_ok=True)
         except OSError:
             pass
+        return False
 
 
 def _get_json(url: str, params: dict) -> dict:
@@ -632,7 +634,7 @@ def _get_json(url: str, params: dict) -> dict:
 
     try:
         payload = json.loads(raw_payload.decode(charset))
-    except (LookupError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (LookupError, ValueError, RecursionError) as error:
         raise WeatherServiceError("Sääpalvelu palautti virheellisen vastauksen.") from error
 
     if not isinstance(payload, dict):
@@ -1165,6 +1167,9 @@ def create_windows_shortcut(shortcut_path: Path) -> None:
     except subprocess.TimeoutExpired as error:
         raise OSError("Pikakuvakkeen luonti aikakatkaistiin.") from error
 
+    if not shortcut_path.is_file():
+        raise OSError("Pikakuvaketiedostoa ei syntynyt.")
+
 
 def set_startup_enabled(enabled: bool) -> None:
     with STARTUP_SHORTCUT_LOCK:
@@ -1333,11 +1338,9 @@ class WeatherWidget(tk.Tk):
         self.status_var = tk.StringVar(value="Päivitetään säätä...")
         self.clock_var = tk.StringVar(value="--")
         self.startup_change_in_progress = False
-        initial_theme_id = self.settings.get("popup_theme", DEFAULT_POPUP_THEME)
-        self.popup_theme_id = self._resolve_popup_theme_id(initial_theme_id)
-        self.settings["popup_theme"] = self.popup_theme_id
-        if initial_theme_id != self.popup_theme_id:
-            save_settings(self.settings)
+        self.desktop_shortcut_in_progress = False
+        self._settings_save_pending = False
+        self.popup_theme_id = self._resolve_popup_theme_id(self.settings.get("popup_theme"))
         self.fetch_in_progress = False
         self.pending_city_search: str | None = None
         self.update_check_in_progress = False
@@ -1387,6 +1390,18 @@ class WeatherWidget(tk.Tk):
         if not IS_FROZEN:
             self.update_job = self.after(UPDATE_CHECK_DELAY_MS, self.check_for_app_update)
         self.after(1500, self._refresh_startup_shortcut_if_enabled)
+
+    def _persist_settings(self) -> None:
+        was_pending = self._settings_save_pending
+        self._settings_save_pending = not save_settings(self.settings)
+        if self._settings_save_pending and not was_pending:
+            messagebox.showwarning(
+                APP_NAME,
+                "Asetusten tallennus epäonnistui. Muutokset ovat käytössä tässä istunnossa, "
+                "mutta voivat kadota uudelleenkäynnistyksessä. Tallennusta yritetään uudelleen "
+                "seuraavan onnistuneen sääpäivityksen yhteydessä.\n\n"
+                f"Asetustiedosto: {SETTINGS_PATH}",
+            )
 
     def _apply_app_icon(self) -> None:
         if APP_LOGO_PATH.exists():
@@ -1545,10 +1560,28 @@ class WeatherWidget(tk.Tk):
             self.status_var.set("Automaattinen käynnistys poistettu käytöstä.")
 
     def _create_desktop_shortcut_from_tray(self) -> None:
-        try:
-            shortcut_path = create_desktop_shortcut()
-        except Exception as error:  # noqa: BLE001
-            messagebox.showerror(APP_NAME, f"Työpöydän pikakuvakkeen luonti epäonnistui: {error}")
+        if self.desktop_shortcut_in_progress:
+            return
+        self.desktop_shortcut_in_progress = True
+        self.status_var.set("Luodaan työpöydän pikakuvaketta...")
+
+        def worker() -> None:
+            shortcut_path = None
+            error_text = None
+            try:
+                shortcut_path = create_desktop_shortcut()
+            except Exception as error:  # noqa: BLE001
+                error_text = str(error)
+            self._call_on_ui_thread(lambda: self._finish_desktop_shortcut(shortcut_path, error_text))
+
+        self._start_background_worker(worker)
+
+    def _finish_desktop_shortcut(self, shortcut_path: Path | None, error_text: str | None) -> None:
+        self.desktop_shortcut_in_progress = False
+        if shortcut_path is None:
+            message = f"Työpöydän pikakuvakkeen luonti epäonnistui: {error_text or 'Kohdetta ei saatu.'}"
+            self.status_var.set(message)
+            messagebox.showerror(APP_NAME, message)
             return
 
         self.status_var.set(f"Pikakuvake luotu: {shortcut_path.name}")
@@ -1736,6 +1769,8 @@ class WeatherWidget(tk.Tk):
         if self._is_destroying:
             return
         self._is_destroying = True
+        if self._settings_save_pending:
+            save_settings(self.settings)
 
         for job_name in ("clock_job", "refresh_job", "bootstrap_job", "update_job", "restart_job", "ui_poll_job"):
             job_id = getattr(self, job_name, None)
@@ -2516,7 +2551,6 @@ class WeatherWidget(tk.Tk):
 
         self.popup_theme_id = resolved
         self.settings["popup_theme"] = resolved
-        save_settings(self.settings)
         self.popup_bg_size = None
         self._update_theme_dot_color()
 
@@ -2526,6 +2560,7 @@ class WeatherWidget(tk.Tk):
             self._draw_popup_gradient(width, height)
 
         self.status_var.set(f"Väriteema: {self._current_popup_theme().get('name', resolved)}")
+        self._persist_settings()
 
     def _cycle_popup_theme(self, _event: tk.Event | None = None) -> None:
         self._set_popup_theme(self._next_popup_theme_id())
@@ -2794,9 +2829,9 @@ class WeatherWidget(tk.Tk):
         self.latest_weather = weather_data
         self.last_weather_update = refreshed_at
         self.city_var.set(normalized_city)
-        if self.settings.get("city") != normalized_city:
+        city_changed = self.settings.get("city") != normalized_city
+        if city_changed:
             self.settings["city"] = normalized_city
-            save_settings(self.settings)
 
         self._apply_current_weather_summary(style, current_temp, city_text, f"Päivitetty {now_text}")
         self._apply_today_detail_metrics(
@@ -2817,6 +2852,8 @@ class WeatherWidget(tk.Tk):
         self._apply_forecast_cards(daily)
 
         self.popup_bg_canvas.itemconfigure(self.footer_label, text=FOOTER_TEXT)
+        if city_changed or self._settings_save_pending:
+            self._persist_settings()
         self.fetch_in_progress = False
         self._schedule_refresh()
         self._run_pending_city_search()

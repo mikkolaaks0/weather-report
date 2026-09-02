@@ -16,6 +16,7 @@ from the system tray.
 - Near-term precipitation probability based on the next 6 hours
 - Automatic weather refresh every 30 minutes
 - Optional startup shortcut for Windows login, updated without blocking the popup
+- Desktop shortcut creation from the tray, also without blocking the popup
 - Automatic startup check and manual tray update check when running from a Git checkout
 
 ## Requirements
@@ -184,6 +185,9 @@ User settings are stored under:
 If `APPDATA` is unavailable, the app uses `LOCALAPPDATA`. Invalid settings fields
 fall back to defaults, and an unreadable or malformed settings file does not
 prevent startup.
+Settings are saved atomically: a failed write keeps the previous file intact and
+shows one warning per failure episode. Unsaved changes remain active in the
+current session and are retried after a successful weather refresh and on exit.
 
 ## Updates
 
