@@ -5,6 +5,7 @@ import queue
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -652,9 +653,13 @@ def _get_json(url: str, params: dict) -> dict:
             "User-Agent": f"{APP_SLUG}-desktop",
         },
     )
-    with urlopen(request, timeout=12) as response:
-        raw_payload = response.read(MAX_JSON_RESPONSE_BYTES + 1)
-        charset = response.headers.get_content_charset() or "utf-8"
+    try:
+        with urlopen(request, timeout=12) as response:
+            raw_payload = response.read(MAX_JSON_RESPONSE_BYTES + 1)
+            charset = response.headers.get_content_charset() or "utf-8"
+    except HTTPError as error:
+        error.close()
+        raise
 
     if len(raw_payload) > MAX_JSON_RESPONSE_BYTES:
         raise WeatherServiceError("Sääpalvelun vastaus oli liian suuri.")
@@ -1170,7 +1175,14 @@ def _resolve_shortcut_target() -> tuple[str, str, str, str]:
 
 def create_windows_shortcut(shortcut_path: Path) -> None:
     shortcut_path.parent.mkdir(parents=True, exist_ok=True)
+    # Keep the working shortcut intact until its replacement has been written.
+    with tempfile.TemporaryDirectory(prefix=f".{APP_SLUG}-", dir=shortcut_path.parent) as directory:
+        staged_path = Path(directory) / shortcut_path.name
+        _write_windows_shortcut(staged_path)
+        os.replace(staged_path, shortcut_path)
 
+
+def _write_windows_shortcut(shortcut_path: Path) -> None:
     if IS_FROZEN and not APP_EXECUTABLE_PATH.exists():
         raise FileNotFoundError(f"Käynnistyskohdetta ei löytynyt: {APP_EXECUTABLE_PATH.name}")
 
@@ -1556,7 +1568,7 @@ class WeatherWidget(tk.Tk):
             self.tray_icon = pystray.Icon(APP_SLUG, tray_image, APP_NAME, menu)
             self.tray_icon.run_detached()
         except Exception as error:  # noqa: BLE001
-            self.tray_icon = None
+            self._stop_tray_icon()
             self.status_var.set(f"Tray-kuvakkeen käynnistys epäonnistui: {error}")
             self.deiconify()
 
@@ -1590,7 +1602,10 @@ class WeatherWidget(tk.Tk):
     def _finish_startup_change(self, error_text: str | None) -> None:
         self.startup_change_in_progress = False
         if self.tray_icon:
-            self.tray_icon.update_menu()
+            try:
+                self.tray_icon.update_menu()
+            except Exception:  # noqa: BLE001
+                self.report_callback_exception(*sys.exc_info())
         if error_text:
             message = f"Käynnistysasetuksen päivitys epäonnistui: {error_text}"
             self.status_var.set(message)
@@ -2711,6 +2726,10 @@ class WeatherWidget(tk.Tk):
             self._call_on_ui_thread(lambda message=message: self._show_error(message))
 
     def _handle_weather_result(self, place: dict, weather: dict, requested_city: str) -> None:
+        if self.pending_city_search:
+            self.fetch_in_progress = False
+            self._run_pending_city_search()
+            return
         try:
             self._apply_weather(place, weather, requested_city)
         except WeatherServiceError as error:
@@ -2720,6 +2739,9 @@ class WeatherWidget(tk.Tk):
 
     def _show_error(self, text: str, notify_user: bool = False) -> None:
         self.fetch_in_progress = False
+        if self.pending_city_search:
+            self._run_pending_city_search()
+            return
         self.status_var.set(f"Päivitys epäonnistui: {text} Yritetään uudelleen 30 minuutin päästä.")
         self.popup_bg_canvas.itemconfigure(self.hero_updated_label, text="Päivitys epäonnistui")
         # Keep the last successful weather symbol in tray after transient fetch errors.
@@ -2941,7 +2963,10 @@ class WeatherWidget(tk.Tk):
 
         self.status_var.set("")
         self._update_tray_symbol(style.icon_key, f"{city_text}: {current_temp} {style.label}")
-        if _normalize_city_query(self.detail_city_var.get()).casefold() == requested_city_text.casefold():
+        if (
+            not self.city_search.editing
+            and _normalize_city_query(self.detail_city_var.get()).casefold() == requested_city_text.casefold()
+        ):
             self.city_search.set_text(normalized_city, saved_place)
         self._apply_forecast_cards(daily)
 

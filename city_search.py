@@ -30,6 +30,7 @@ class CitySearch(tk.Frame):
         self.ready = False
         self.complete = False
         self.confirm_pending = False
+        self.editing = False
         self.chosen_place: dict | None = None
         self.debounce_job = None
         self.focus_job = None
@@ -47,6 +48,7 @@ class CitySearch(tk.Frame):
         self.row_font = tkfont.Font(self, font=font)
         self.trace_id = variable.trace_add("write", self._changed)
         entry.bind("<Return>", self.confirm)
+        entry.bind("<KP_Enter>", self.confirm)
         entry.bind("<Down>", lambda event: self._move(1))
         entry.bind("<Up>", lambda event: self._move(-1))
         entry.bind("<Escape>", self._escape)
@@ -79,6 +81,7 @@ class CitySearch(tk.Frame):
 
     def set_text(self, text: str, place: dict | None = None) -> None:
         self.dismiss()
+        self.editing = False
         self._setting_text = True
         try:
             self.variable.set(text)
@@ -89,6 +92,7 @@ class CitySearch(tk.Frame):
     def _changed(self, *_args) -> None:
         if self.closed or self._setting_text:
             return
+        self.editing = True
         self.dismiss()
         self.chosen_place = None
         self.query = self._text()
@@ -159,6 +163,7 @@ class CitySearch(tk.Frame):
             self.set_text(query, place)
         else:
             self.dismiss()
+            self.editing = False
         self._finish_editing()
         self.submit(query, place)
         return "break"

@@ -133,6 +133,23 @@ class AutocompleteTests(unittest.TestCase):
         self.finish_request()
         self.search.assert_called_once_with("Hel")
 
+    def test_edit_state_is_kept_until_confirmation_finishes(self):
+        self.assertFalse(self.control.editing)
+        self.variable.set("Hel")
+        self.assertTrue(self.control.editing)
+        self.control.confirm()
+        self.assertTrue(self.control.editing)
+        self.finish_request()
+        self.assertFalse(self.control.editing)
+        self.assertTrue(self.entry.bind("<KP_Enter>"))
+
+    def test_free_text_confirmation_also_finishes_edit_state(self):
+        self.search.return_value = []
+        self.results_for("Missing")
+        self.assertTrue(self.control.editing)
+        self.control.confirm()
+        self.assertFalse(self.control.editing)
+
     def test_enter_uses_first_suggestion_and_returns_full_name(self):
         self.results_for()
         self.assertEqual(self.control.listbox.curselection(), (0,))

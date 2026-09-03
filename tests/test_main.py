@@ -160,6 +160,14 @@ class DataFormattingTests(unittest.TestCase):
 
 
 class ServicePayloadTests(unittest.TestCase):
+    def test_json_client_closes_http_errors_without_a_retry_wrapper(self) -> None:
+        body = io.BytesIO(b"unavailable")
+        error = HTTPError("https://example.invalid", 503, "unavailable", None, body)
+        with patch.object(main, "urlopen", side_effect=error):
+            with self.assertRaises(HTTPError):
+                main._get_json("https://example.invalid", {})
+        self.assertTrue(body.closed)
+
     def test_interrupted_connections_are_retried_with_a_fixed_limit(self) -> None:
         for error in (ConnectionResetError("reset"), RemoteDisconnected("closed"), IncompleteRead(b"partial")):
             with self.subTest(error=type(error).__name__), patch.object(main.time, "sleep") as sleep:
@@ -527,7 +535,7 @@ class SettingsAndShortcutTests(unittest.TestCase):
                 ),
                 patch.object(main.subprocess, "run", side_effect=lambda *_args, **_kwargs: shortcut_path.touch()) as run,
             ):
-                main.create_windows_shortcut(shortcut_path)
+                main._write_windows_shortcut(shortcut_path)
 
         self.assertIn("-NonInteractive", run.call_args.args[0])
 
@@ -541,6 +549,68 @@ class SettingsAndShortcutTests(unittest.TestCase):
             ):
                 with self.assertRaises(OSError):
                     main.create_windows_shortcut(shortcut_path)
+
+    def test_shortcut_replacement_is_atomic_and_cleans_up_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shortcut = Path(directory) / "Weather Report.lnk"
+            shortcut.write_bytes(b"old shortcut")
+
+            def write_new(staged):
+                self.assertNotEqual(staged, shortcut)
+                self.assertEqual(staged.parent.parent, shortcut.parent)
+                self.assertEqual(shortcut.read_bytes(), b"old shortcut")
+                staged.write_bytes(b"new shortcut")
+
+            with patch.object(main, "_write_windows_shortcut", side_effect=write_new):
+                main.create_windows_shortcut(shortcut)
+            self.assertEqual(shortcut.read_bytes(), b"new shortcut")
+            self.assertEqual(list(Path(directory).iterdir()), [shortcut])
+
+    def test_failed_shortcut_write_or_replacement_preserves_old_link(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shortcut = Path(directory) / "Weather Report.lnk"
+            shortcut.write_bytes(b"old shortcut")
+
+            def incomplete_write(staged):
+                staged.write_bytes(b"partial")
+                raise OSError("write interrupted")
+
+            with patch.object(main, "_write_windows_shortcut", side_effect=incomplete_write):
+                with self.assertRaises(OSError):
+                    main.create_windows_shortcut(shortcut)
+            self.assertEqual(shortcut.read_bytes(), b"old shortcut")
+            self.assertEqual(list(Path(directory).iterdir()), [shortcut])
+
+            with (
+                patch.object(main, "_write_windows_shortcut", side_effect=lambda path: path.write_bytes(b"new")),
+                patch.object(main.os, "replace", side_effect=PermissionError("locked")),
+            ):
+                with self.assertRaises(PermissionError):
+                    main.create_windows_shortcut(shortcut)
+            self.assertEqual(shortcut.read_bytes(), b"old shortcut")
+            self.assertEqual(list(Path(directory).iterdir()), [shortcut])
+
+    @unittest.skipUnless(main.os.name == "nt", "Windows shortcut integration")
+    def test_atomic_replacement_produces_a_readable_windows_shortcut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shortcut = Path(directory) / "Weather Report's test.lnk"
+            shortcut.write_bytes(b"old invalid shortcut")
+            target = str(Path(directory) / "WeatherReport.exe")
+            with patch.object(main, "_resolve_shortcut_target", return_value=(target, "--test", directory, target)):
+                main.create_windows_shortcut(shortcut)
+            command = (
+                "$ErrorActionPreference = 'Stop'; "
+                "$shell = New-Object -ComObject WScript.Shell; "
+                f"$link = $shell.CreateShortcut('{main._ps_escape(str(shortcut))}'); "
+                "@{Target=$link.TargetPath; Arguments=$link.Arguments; WorkingDirectory=$link.WorkingDirectory} | ConvertTo-Json -Compress"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+                capture_output=True, text=True, check=True, timeout=20, **main._hidden_subprocess_kwargs(),
+            )
+            actual = json.loads(result.stdout)
+            self.assertEqual(actual, {"Target": target, "Arguments": "--test", "WorkingDirectory": directory})
+            self.assertEqual(list(Path(directory).iterdir()), [shortcut])
 
     def test_source_restart_keeps_the_working_python_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -584,6 +654,35 @@ class SettingsAndShortcutTests(unittest.TestCase):
 
 
 class TrayMenuTests(unittest.TestCase):
+    def test_partial_tray_startup_is_cleaned_up_before_showing_fallback(self) -> None:
+        widget = object.__new__(main.WeatherWidget)
+        widget.tray_symbol = "cloud"
+        widget.status_var = Mock()
+        widget.deiconify = Mock()
+        tray = Mock()
+        tray.run_detached.side_effect = OSError("tray unavailable")
+        fake_pystray = Mock()
+        fake_pystray.Icon.return_value = tray
+        with patch.object(main, "pystray", fake_pystray), patch.object(main, "build_tray_symbol_icon", return_value=object()):
+            widget._init_tray_icon()
+        tray.stop.assert_called_once()
+        self.assertIsNone(widget.tray_icon)
+        widget.deiconify.assert_called_once()
+
+    def test_tray_menu_failure_does_not_hide_a_startup_setting_error(self) -> None:
+        widget = object.__new__(main.WeatherWidget)
+        widget.startup_change_in_progress = True
+        widget.status_var = Mock()
+        widget.tray_icon = Mock()
+        widget.tray_icon.update_menu.side_effect = OSError("tray unavailable")
+        widget.report_callback_exception = Mock()
+        with patch.object(main.messagebox, "showerror") as show_error:
+            widget._finish_startup_change("access denied")
+        self.assertFalse(widget.startup_change_in_progress)
+        show_error.assert_called_once()
+        self.assertIn("access denied", show_error.call_args.args[1])
+        widget.report_callback_exception.assert_called_once()
+
     def test_tray_titles_fit_the_windows_buffer_without_splitting_unicode(self) -> None:
         widget = object.__new__(main.WeatherWidget)
         widget.tray_icon = Mock()
@@ -1010,6 +1109,7 @@ class WeatherResultTests(unittest.TestCase):
         widget.detail_city_var = Mock()
         widget.detail_city_var.get.return_value = entry
         widget.city_search = Mock()
+        widget.city_search.editing = False
         widget.city_search.set_text.side_effect = lambda text, place: widget.detail_city_var.set(text)
         widget.status_var = Mock()
         widget.popup_bg_canvas = Mock()
@@ -1021,7 +1121,39 @@ class WeatherResultTests(unittest.TestCase):
         widget._update_tray_symbol = Mock()
         widget._schedule_refresh = Mock()
         widget._run_pending_city_search = Mock()
+        widget.pending_city_search = None
         return widget
+
+    def test_superseded_weather_success_does_not_replace_the_selected_city(self) -> None:
+        widget = self.make_result_widget("Richmond")
+        widget.fetch_in_progress = True
+        widget.pending_city_search = "Richmond"
+        widget._apply_weather = Mock()
+        widget._handle_weather_result({"name": "Richmond", "latitude": 37.54, "longitude": -77.43}, {}, "Richmond")
+        widget._apply_weather.assert_not_called()
+        self.assertFalse(widget.fetch_in_progress)
+        widget._run_pending_city_search.assert_called_once()
+
+    def test_superseded_weather_error_does_not_interrupt_the_next_search(self) -> None:
+        widget = self.make_result_widget("Espoo")
+        widget.fetch_in_progress = True
+        widget.latest_weather = None
+        widget.pending_city_search = "Espoo"
+        with patch.object(main.messagebox, "showerror") as show_error:
+            widget._show_error("Old city not found", notify_user=True)
+        show_error.assert_not_called()
+        widget._update_tray_symbol.assert_not_called()
+        widget._schedule_refresh.assert_not_called()
+        self.assertFalse(widget.fetch_in_progress)
+        widget._run_pending_city_search.assert_called_once()
+
+    def test_weather_refresh_does_not_reset_an_active_same_name_search(self) -> None:
+        widget = self.make_result_widget("Espoo")
+        widget.city_search.editing = True
+        weather = {"current": {"weather_code": 3, "temperature_2m": 18}, "daily": {"time": ["2026-09-04"]}}
+        widget._apply_weather({"name": "Espoo"}, weather, "Espoo")
+        widget.city_search.set_text.assert_not_called()
+        widget._apply_forecast_cards.assert_called_once()
 
     def test_tray_failure_does_not_interrupt_weather_or_future_refreshes(self) -> None:
         class FailingTray:

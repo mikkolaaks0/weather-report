@@ -1,12 +1,58 @@
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import main
 
 
 @unittest.skipUnless(os.name == "nt" and main.ImageTk is not None, "Windows Tk/Pillow smoke test")
 class PopupSmokeTests(unittest.TestCase):
+    def test_weather_refresh_preserves_suggestions_and_hae_confirms_selection(self) -> None:
+        settings = {"city": "Espoo", "temperature_unit": "celsius", "popup_theme": main.DEFAULT_POPUP_THEME}
+        espoo = {"name": "Espoo", "latitude": 60.20, "longitude": 24.65}
+        espoonlahti = {"name": "Espoonlahti", "latitude": 60.15, "longitude": 24.65}
+        weather = {"current": {"weather_code": 3, "temperature_2m": 18}, "daily": {"time": ["2026-09-04"]}}
+        with (
+            patch.object(main, "load_settings", return_value=settings),
+            patch.object(main, "save_settings"),
+            patch.object(main, "is_startup_enabled", return_value=False),
+            patch.object(main.WeatherWidget, "_init_tray_icon"),
+            patch.object(main.WeatherWidget, "_start_background_worker") as worker,
+        ):
+            widget = main.WeatherWidget()
+            try:
+                widget._apply_weather(espoo, weather, "Espoo")
+                widget.detail_city_var.set("Espoo")
+                control = widget.city_search
+                control._request()
+                generation = control.generation
+                control._receive(generation, [espoo, espoonlahti], False)
+                control._move(1)
+                widget._handle_weather_result(espoo, weather, "Espoo")
+                self.assertEqual(control.generation, generation)
+                self.assertEqual(control.listbox.curselection(), (1,))
+                widget._fetch_worker = Mock()
+                widget.search_button.invoke()
+                self.assertEqual(widget.detail_city_var.get(), "Espoonlahti")
+                self.assertFalse(control.editing)
+                worker.call_args.args[0]()
+                widget._fetch_worker.assert_called_once_with("Espoonlahti", "celsius", espoonlahti)
+
+                # A same-name background refresh must not cancel an early Enter.
+                widget._handle_weather_result(espoonlahti, weather, "Espoonlahti")
+                widget.detail_city_var.set("Espoonlahti")
+                control.confirm()
+                generation = control.generation
+                widget._handle_weather_result(espoonlahti, weather, "Espoonlahti")
+                self.assertEqual(control.generation, generation)
+                self.assertTrue(control.confirm_pending)
+                control._receive(generation, [espoonlahti], False)
+                self.assertFalse(control.confirm_pending)
+                self.assertFalse(widget.winfo_viewable())
+                self.assertFalse(widget.popup.winfo_viewable())
+            finally:
+                widget.destroy()
+
     def test_current_and_forecast_data_render_in_a_hidden_real_tk_popup(self) -> None:
         settings = {"city": "Espoo", "temperature_unit": "celsius", "popup_theme": main.DEFAULT_POPUP_THEME}
         dates = [f"2026-09-{day:02}" for day in range(2, 9)]

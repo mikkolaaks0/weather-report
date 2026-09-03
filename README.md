@@ -14,6 +14,7 @@ from the system tray.
 - City autocomplete with up to five location suggestions and saved coordinates
 - Enter or Hae confirms the top suggestion; arrow keys choose another match
 - The latest submitted city search takes precedence, including its exact location
+- Background refreshes preserve the city being edited and the highlighted suggestion
 - Temperature, daily high/low, precipitation, humidity, wind, sunrise and sunset
 - Near-term precipitation probability based on the next 6 hours
 - Automatic weather refresh every 30 minutes
@@ -103,6 +104,8 @@ For a windowless launch, use:
 
 Source-mode shortcuts use this launcher so they keep working after a compatible
 Python installation is moved or upgraded.
+The app replaces startup and desktop shortcuts atomically: an interrupted write
+keeps the previous working link intact.
 
 ## Build
 
@@ -146,6 +149,9 @@ handler is exercised using temporary program directories and shortcut snapshots.
 Transport interruption tests check bounded retries and closed HTTP error responses.
 Tray tests cover Windows tooltip limits (including UTF-16 text) and verify that a
 tray failure cannot interrupt forecast rendering or the next scheduled refresh.
+Superseded weather results and errors are ignored when a newer city search is
+queued. Tests also cover same-name autocomplete interactions during refresh and
+atomic shortcut replacement, including interrupted writes and locked files.
 
 ## Bundled Assets
 
