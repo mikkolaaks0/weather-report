@@ -15,6 +15,7 @@ from the system tray.
 - Temperature, daily high/low, precipitation, humidity, wind, sunrise and sunset
 - Near-term precipitation probability based on the next 6 hours
 - Automatic weather refresh every 30 minutes
+- Failed refreshes are marked on the popup while keeping the last valid forecast
 - Optional startup shortcut for Windows login, updated without blocking the popup
 - Desktop shortcut creation from the tray, also without blocking the popup
 - Automatic startup check and manual tray update check when running from a Git checkout
@@ -128,6 +129,9 @@ update, restart-detection, and conflict paths without contacting GitHub. Install
 process selection and release-source checks run in isolation: the suite does not
 install the app or modify the user's startup shortcuts. The installer's failure
 handler is exercised using temporary program directories and shortcut snapshots.
+Transport interruption tests check bounded retries and closed HTTP error responses.
+Tray tests cover Windows tooltip limits (including UTF-16 text) and verify that a
+tray failure cannot interrupt forecast rendering or the next scheduled refresh.
 
 ## Bundled Assets
 

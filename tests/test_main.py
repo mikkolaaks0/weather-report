@@ -1,3 +1,5 @@
+import ctypes
+import io
 import json
 import queue
 import re
@@ -6,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from http.client import IncompleteRead, RemoteDisconnected
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 
@@ -157,6 +160,36 @@ class DataFormattingTests(unittest.TestCase):
 
 
 class ServicePayloadTests(unittest.TestCase):
+    def test_interrupted_connections_are_retried_with_a_fixed_limit(self) -> None:
+        for error in (ConnectionResetError("reset"), RemoteDisconnected("closed"), IncompleteRead(b"partial")):
+            with self.subTest(error=type(error).__name__), patch.object(main.time, "sleep") as sleep:
+                operation = Mock(side_effect=[error, {"ok": True}])
+                self.assertEqual(main._request_with_retry(operation), {"ok": True})
+                self.assertEqual(operation.call_count, 2)
+                sleep.assert_called_once_with(1.0)
+
+                operation = Mock(side_effect=error)
+                with self.assertRaises(type(error)):
+                    main._request_with_retry(operation)
+                self.assertEqual(operation.call_count, 2)
+
+    def test_http_error_responses_are_closed_before_retry_or_propagation(self) -> None:
+        for code in (404, 429, 503):
+            with self.subTest(code=code):
+                body = io.BytesIO(b"server error")
+                error = HTTPError("https://example.invalid", code, "error", None, body)
+                operation = Mock(side_effect=[error, {"ok": True}])
+                with patch.object(main.time, "sleep", side_effect=lambda _delay: self.assertTrue(body.closed)) as sleep:
+                    if code == 404:
+                        with self.assertRaises(HTTPError):
+                            main._request_with_retry(operation)
+                        self.assertEqual(operation.call_count, 1)
+                        sleep.assert_not_called()
+                    else:
+                        self.assertEqual(main._request_with_retry(operation), {"ok": True})
+                        sleep.assert_called_once_with(1.0)
+                self.assertTrue(body.closed)
+
     def test_network_retry_retries_only_transient_transport_errors(self) -> None:
         calls = iter((URLError("temporary"), {"ok": True}))
 
@@ -551,6 +584,23 @@ class SettingsAndShortcutTests(unittest.TestCase):
 
 
 class TrayMenuTests(unittest.TestCase):
+    def test_tray_titles_fit_the_windows_buffer_without_splitting_unicode(self) -> None:
+        widget = object.__new__(main.WeatherWidget)
+        widget.tray_icon = Mock()
+        widget.report_callback_exception = Mock()
+        titles = ("Espoo: 18 C", "A" * 127, "A" * 200, "x" + "\U0001f600" * 100)
+        for title in titles:
+            with self.subTest(length=len(title)), patch.object(main, "build_tray_symbol_icon", return_value=None):
+                widget._update_tray_symbol("cloudy", title)
+                actual = widget.tray_icon.title
+                self.assertLessEqual(len(actual.encode("utf-16-le")), 254)
+                ctypes.create_unicode_buffer(128).value = actual
+                if len(title.encode("utf-16-le")) <= 254:
+                    self.assertEqual(actual, title)
+                else:
+                    self.assertTrue(actual.endswith("..."))
+        widget.report_callback_exception.assert_not_called()
+
     def test_desktop_shortcut_failure_allows_retry(self) -> None:
         widget = object.__new__(main.WeatherWidget)
         widget.desktop_shortcut_in_progress = False
@@ -962,6 +1012,7 @@ class WeatherResultTests(unittest.TestCase):
         widget.status_var = Mock()
         widget.popup_bg_canvas = Mock()
         widget.footer_label = 1
+        widget.hero_updated_label = 2
         widget._apply_current_weather_summary = Mock()
         widget._apply_today_detail_metrics = Mock()
         widget._apply_forecast_cards = Mock()
@@ -969,6 +1020,45 @@ class WeatherResultTests(unittest.TestCase):
         widget._schedule_refresh = Mock()
         widget._run_pending_city_search = Mock()
         return widget
+
+    def test_tray_failure_does_not_interrupt_weather_or_future_refreshes(self) -> None:
+        class FailingTray:
+            @property
+            def icon(self):
+                return None
+
+            @icon.setter
+            def icon(self, _value):
+                raise OSError("tray temporarily unavailable")
+
+        widget = self.make_result_widget()
+        del widget._update_tray_symbol
+        widget.tray_icon = FailingTray()
+        widget.report_callback_exception = Mock()
+        weather = {"current": {"weather_code": 3, "temperature_2m": 18}, "daily": {"time": ["2026-09-03"]}}
+        with patch.object(main, "build_tray_symbol_icon", return_value=object()):
+            widget._apply_weather({"name": "Espoo"}, weather, "Espoo")
+        self.assertIs(widget.latest_weather, weather)
+        self.assertFalse(widget.fetch_in_progress)
+        widget._apply_forecast_cards.assert_called_once()
+        widget._schedule_refresh.assert_called_once()
+        widget._run_pending_city_search.assert_called_once()
+        widget.report_callback_exception.assert_called_once()
+
+    def test_failed_refresh_marks_the_card_without_discarding_good_weather(self) -> None:
+        widget = self.make_result_widget()
+        weather = {"current": {"weather_code": 3, "temperature_2m": 18}, "daily": {"time": ["2026-09-03"]}}
+        widget._apply_weather({"name": "Espoo"}, weather, "Espoo")
+        with patch.object(main.messagebox, "showerror") as dialog:
+            widget._show_error("Network error")
+        self.assertIs(widget.latest_weather, weather)
+        self.assertFalse(widget.fetch_in_progress)
+        updates = [call.kwargs.get("text", "") for call in widget.popup_bg_canvas.itemconfigure.call_args_list
+                   if call.args[0] == widget.hero_updated_label]
+        self.assertTrue(any("epäonnistui" in text for text in updates))
+        dialog.assert_not_called()
+        self.assertEqual(widget._schedule_refresh.call_count, 2)
+        self.assertEqual(widget._run_pending_city_search.call_count, 2)
 
     def test_settings_failure_warns_once_and_retries_with_latest_preferences(self) -> None:
         widget = self.make_result_widget()

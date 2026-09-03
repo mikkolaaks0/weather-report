@@ -42,6 +42,15 @@ class PopupSmokeTests(unittest.TestCase):
                 for item, expected_size in icon_items:
                     x1, y1, x2, y2 = canvas.bbox(item)
                     self.assertEqual((x2 - x1, y2 - y1), expected_size)
+
+                with patch.object(main.messagebox, "showerror") as dialog:
+                    widget._show_error("Network error")
+                self.assertEqual(canvas.itemcget(widget.hero_updated_label, "text"), "Päivitys epäonnistui")
+                self.assertEqual(canvas.itemcget(widget.hero_temp_label, "text"), "18\N{DEGREE SIGN}C")
+                self.assertIs(widget.latest_weather, weather)
+                dialog.assert_not_called()
+                widget._apply_weather({"name": "Espoo", "admin1": "Uusimaa"}, weather, "Espoo")
+                self.assertTrue(canvas.itemcget(widget.hero_updated_label, "text").startswith("Päivitetty "))
                 self.assertFalse(widget.winfo_viewable())
                 self.assertFalse(widget.popup.winfo_viewable())
             finally:

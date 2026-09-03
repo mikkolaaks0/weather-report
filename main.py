@@ -11,6 +11,7 @@ import tkinter as tk
 import webbrowser
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from http.client import IncompleteRead
 from pathlib import Path
 from tkinter import messagebox
 from tkinter import font as tkfont
@@ -36,7 +37,7 @@ except Exception:  # noqa: BLE001
 APP_NAME = "Weather Report"
 APP_SLUG = "weather-report"
 APP_VERSION = "0.1.1"
-APP_VERSION_DATE = "02.09.2026"
+APP_VERSION_DATE = "03.09.2026"
 APP_VERSION_LABEL = APP_VERSION_DATE
 FOOTER_TEXT = (
     f"Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot "
@@ -51,6 +52,7 @@ FRESH_WEATHER_MAX_AGE_MINUTES = 15
 UPDATE_CHECK_DELAY_MS = 10 * 1000
 MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_CITY_QUERY_LENGTH = 120
+TRAY_TOOLTIP_MAX_UTF16_UNITS = 127
 DEFAULT_CITY = "Helsinki"
 VALID_TEMPERATURE_UNITS = {"celsius", "fahrenheit"}
 FORECAST_DAYS = 7
@@ -724,14 +726,14 @@ def _request_with_retry(
         try:
             return operation()
         except HTTPError as error:
+            error.close()
             retryable = error.code in {408, 425, 429} or error.code >= 500
             if not retryable or attempt == attempts - 1:
                 raise
-            time.sleep(max(0.0, retry_delay_seconds))
-        except (URLError, TimeoutError):
+        except (URLError, TimeoutError, ConnectionError, IncompleteRead):
             if attempt == attempts - 1:
                 raise
-            time.sleep(max(0.0, retry_delay_seconds))
+        time.sleep(max(0.0, retry_delay_seconds))
     raise RuntimeError("Verkkopyyntö ei palauttanut tulosta.")
 
 
@@ -1726,10 +1728,20 @@ class WeatherWidget(tk.Tk):
         if not self.tray_icon:
             return
 
-        tray_image = build_tray_symbol_icon(symbol_text)
-        if tray_image is not None:
-            self.tray_icon.icon = tray_image
-        self.tray_icon.title = title_text
+        try:
+            # Windows reserves one UTF-16 code unit for the tooltip terminator.
+            encoded_title = title_text.encode("utf-16-le")
+            if len(encoded_title) > TRAY_TOOLTIP_MAX_UTF16_UNITS * 2:
+                title_text = encoded_title[: (TRAY_TOOLTIP_MAX_UTF16_UNITS - 3) * 2].decode(
+                    "utf-16-le", errors="ignore"
+                ) + "..."
+            tray_image = build_tray_symbol_icon(symbol_text)
+            if tray_image is not None:
+                self.tray_icon.icon = tray_image
+            self.tray_icon.title = title_text
+        except Exception:  # noqa: BLE001
+            # The tray is secondary to the forecast and must not abort a refresh.
+            self.report_callback_exception(*sys.exc_info())
 
     def _quit_from_tray(self) -> None:
         self.destroy()
@@ -2619,7 +2631,7 @@ class WeatherWidget(tk.Tk):
         except CityNotFoundError as error:
             message = str(error)
             self._call_on_ui_thread(lambda message=message: self._show_error(message, notify_user=True))
-        except (URLError, TimeoutError):
+        except (URLError, TimeoutError, ConnectionError, IncompleteRead):
             self._call_on_ui_thread(lambda: self._show_error("Verkkovirhe. Tarkista internet-yhteys."))
         except WeatherServiceError as error:
             message = str(error)
@@ -2639,6 +2651,7 @@ class WeatherWidget(tk.Tk):
     def _show_error(self, text: str, notify_user: bool = False) -> None:
         self.fetch_in_progress = False
         self.status_var.set(f"Päivitys epäonnistui: {text} Yritetään uudelleen 30 minuutin päästä.")
+        self.popup_bg_canvas.itemconfigure(self.hero_updated_label, text="Päivitys epäonnistui")
         # Keep the last successful weather symbol in tray after transient fetch errors.
         # Show the bullet only when we do not have any weather data yet.
         if self.latest_weather:
