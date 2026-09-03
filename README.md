@@ -11,7 +11,9 @@ from the system tray.
 - Bundled Fluent-style weather icons for the tray, card, and forecast panel
 - Bundled metric icons for rain amount, rain probability, humidity, and wind rows
 - Bundled Exo 2 app font; no separate font installation is required
-- City search with saved settings; the latest submitted search takes precedence
+- City autocomplete with up to five location suggestions and saved coordinates
+- Enter or Hae confirms the top suggestion; arrow keys choose another match
+- The latest submitted city search takes precedence, including its exact location
 - Temperature, daily high/low, precipitation, humidity, wind, sunrise and sunset
 - Near-term precipitation probability based on the next 6 hours
 - Automatic weather refresh every 30 minutes
@@ -77,6 +79,17 @@ also resets their saved preferences.
 
 ## Run From Source
 
+Location suggestions appear after a brief typing pause (two characters for exact
+names, three or more for prefixes). Enter and Hae use the same selection: the
+highlighted result, initially the first one. Pressing Enter before suggestions
+arrive waits for the current query's first result. Confirmation finishes editing
+and removes keyboard focus from the city field. Escape dismisses suggestions;
+another Escape hides the popup. If suggestions are unavailable, confirmation
+falls back to the regular name search. Selected coordinates are remembered across
+refreshes and restarts, so same-named cities do not silently change location.
+Suggestions use the existing Open-Meteo geocoding service, with no location
+permission or additional dependencies. See its [matching rules](https://open-meteo.com/en/docs/geocoding-api).
+
 ```powershell
 python -m pip install -r requirements.txt
 python .\main.py
@@ -120,7 +133,8 @@ python -m unittest discover -s tests -v
 ```
 
 The tests cover Open-Meteo payload validation and retry behavior, formatting and
-time-window logic, settings persistence, redirected Windows shortcut paths, Git
+time-window logic, settings persistence, autocomplete keyboard selection, stale
+search responses and exact-location persistence, redirected Windows shortcut paths, Git
 update safety, release and installer invariants, all mapped WMO weather codes,
 tray rendering, icon source pairs, PNG transparency, and the PyInstaller asset
 manifest. On Windows, the suite also creates and inspects temporary `.lnk` files

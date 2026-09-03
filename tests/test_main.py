@@ -1009,6 +1009,8 @@ class WeatherResultTests(unittest.TestCase):
         widget.city_var = Mock()
         widget.detail_city_var = Mock()
         widget.detail_city_var.get.return_value = entry
+        widget.city_search = Mock()
+        widget.city_search.set_text.side_effect = lambda text, place: widget.detail_city_var.set(text)
         widget.status_var = Mock()
         widget.popup_bg_canvas = Mock()
         widget.footer_label = 1
@@ -1110,6 +1112,9 @@ class WeatherResultTests(unittest.TestCase):
         widget = object.__new__(main.WeatherWidget)
         widget.fetch_in_progress = False
         widget.pending_city_search = "Turku"
+        widget.pending_city_place = None
+        widget.popup_bg_canvas = Mock()
+        widget.hero_updated_label = 2
         widget._is_destroying = False
         widget.status_var = Mock()
         widget.settings = {}
@@ -1126,6 +1131,9 @@ class WeatherResultTests(unittest.TestCase):
         widget = object.__new__(main.WeatherWidget)
         widget.fetch_in_progress = False
         widget.pending_city_search = "Turku"
+        widget.pending_city_place = None
+        widget.popup_bg_canvas = Mock()
+        widget.hero_updated_label = 2
         widget.status_var = Mock()
         widget.settings = {}
         widget._start_background_worker = Mock()
@@ -1153,6 +1161,8 @@ class WeatherResultTests(unittest.TestCase):
     def test_pending_search_uses_the_most_recent_request(self) -> None:
         widget = object.__new__(main.WeatherWidget)
         widget.fetch_in_progress = True
+        widget.popup_bg_canvas = Mock()
+        widget.hero_updated_label = 2
         widget.status_var = Mock()
         widget._is_destroying = False
         widget.refresh_weather("Turku")

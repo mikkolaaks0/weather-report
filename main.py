@@ -20,6 +20,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from city_search import CitySearch
+
 try:
     import pystray
 except Exception:  # noqa: BLE001
@@ -37,7 +39,7 @@ except Exception:  # noqa: BLE001
 APP_NAME = "Weather Report"
 APP_SLUG = "weather-report"
 APP_VERSION = "0.1.1"
-APP_VERSION_DATE = "03.09.2026"
+APP_VERSION_DATE = "04.09.2026"
 APP_VERSION_LABEL = APP_VERSION_DATE
 FOOTER_TEXT = (
     f"Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot "
@@ -73,6 +75,7 @@ def _runtime_file_signature() -> tuple[tuple[str, int, int], ...] | None:
 
     roots = [
         PROJECT_DIR / "main.py",
+        PROJECT_DIR / "city_search.py",
         PROJECT_DIR / "start_weather_app.bat",
         PROJECT_DIR / "start_weather_app.vbs",
         PROJECT_DIR / "assets",
@@ -568,6 +571,24 @@ def _normalize_city_query(value: object) -> str:
     return " ".join(value.split()) if isinstance(value, str) else ""
 
 
+def _saved_place(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    name = _normalize_city_query(value.get("name"))
+    if not name or len(name) > MAX_CITY_QUERY_LENGTH:
+        return None
+    try:
+        latitude, longitude = _coordinates_from_place(value)
+    except WeatherServiceError:
+        return None
+    place = {"name": name, "latitude": latitude, "longitude": longitude}
+    for key in ("admin1", "country"):
+        text = _normalize_city_query(value.get(key))
+        if text and len(text) <= MAX_CITY_QUERY_LENGTH:
+            place[key] = text
+    return place
+
+
 def load_settings() -> dict:
     settings = {
         "city": DEFAULT_CITY,
@@ -597,6 +618,10 @@ def load_settings() -> dict:
     if popup_theme not in POPUP_THEMES:
         popup_theme = DEFAULT_POPUP_THEME
     settings["popup_theme"] = popup_theme
+
+    place = _saved_place(saved.get("place"))
+    if place is not None and place["name"].casefold() == settings["city"].casefold():
+        settings["place"] = place
 
     return settings
 
@@ -644,7 +669,7 @@ def _get_json(url: str, params: dict) -> dict:
     return payload
 
 
-def geocode_city(city_name: str) -> dict:
+def search_cities(city_name: str, count: int = CitySearch.LIMIT) -> list[dict]:
     normalized_city = _normalize_city_query(city_name)
     if not normalized_city:
         raise CityNotFoundError("Paikkakunnan nimi puuttuu.")
@@ -657,7 +682,7 @@ def geocode_city(city_name: str) -> dict:
         GEOCODING_URL,
         {
             "name": normalized_city,
-            "count": 1,
+            "count": count,
             "language": "fi",
             "format": "json",
         },
@@ -665,15 +690,27 @@ def geocode_city(city_name: str) -> dict:
     results = payload.get("results", [])
     if not isinstance(results, list):
         raise WeatherServiceError("Paikkatiedon vastaus oli väärässä muodossa.")
-    if not results:
-        raise CityNotFoundError("Paikkakuntaa ei löytynyt.")
-
-    place = results[0]
-    if not isinstance(place, dict):
+    places = []
+    seen = set()
+    for result in results:
+        place = _saved_place(result)
+        if place is None:
+            continue
+        key = (place["name"].casefold(), place["latitude"], place["longitude"])
+        if key not in seen:
+            seen.add(key)
+            places.append(place)
+    if results and not places:
         raise WeatherServiceError("Paikkatiedon vastaus oli väärässä muodossa.")
+    # Keep service relevance: a short exact name need not beat a likely prefix.
+    return places[:count]
 
-    latitude, longitude = _coordinates_from_place(place)
-    return {**place, "latitude": latitude, "longitude": longitude}
+
+def geocode_city(city_name: str) -> dict:
+    places = search_cities(city_name, count=1)
+    if not places:
+        raise CityNotFoundError("Paikkakuntaa ei löytynyt.")
+    return places[0]
 
 
 def get_weather(latitude: float, longitude: float, temperature_unit: str = "celsius") -> dict:
@@ -1337,6 +1374,7 @@ class WeatherWidget(tk.Tk):
         self.unit_symbol = "C" if self.settings.get("temperature_unit") == "celsius" else "F"
         self.city_var = tk.StringVar(value=self.settings.get("city", DEFAULT_CITY))
         self.detail_city_var = tk.StringVar(value=self.city_var.get())
+        self.city_label_text = self.city_var.get()
         self.status_var = tk.StringVar(value="Päivitetään säätä...")
         self.clock_var = tk.StringVar(value="--")
         self.startup_change_in_progress = False
@@ -1345,6 +1383,7 @@ class WeatherWidget(tk.Tk):
         self.popup_theme_id = self._resolve_popup_theme_id(self.settings.get("popup_theme"))
         self.fetch_in_progress = False
         self.pending_city_search: str | None = None
+        self.pending_city_place: dict | None = None
         self.update_check_in_progress = False
         self._is_destroying = False
         self._ui_thread_id = threading.get_ident()
@@ -1357,7 +1396,7 @@ class WeatherWidget(tk.Tk):
         self.ui_poll_job: str | None = None
         self.popup: tk.Toplevel | None = None
         self.forecast_cards: list[dict] = []
-        self.latest_place: dict | None = None
+        self.latest_place: dict | None = self.settings.get("place")
         self.latest_weather: dict | None = None
         self.last_weather_update: datetime | None = None
         self.tray_icon = None
@@ -2181,11 +2220,18 @@ class WeatherWidget(tk.Tk):
             width=16,
         )
         self.location_entry.pack(side="left", fill="both", expand=True, ipady=2)
-        self.location_entry.bind("<Return>", lambda _: self._search_from_popup())
 
         self.search_button = self._create_icon_button(self.popup_bg_canvas, "Hae", self._search_from_popup, width=4)
         self.refresh_button = self._create_icon_button(self.popup_bg_canvas, "⟳", self.refresh_weather)
         self.close_button = self._create_icon_button(self.popup_bg_canvas, "✕", self._hide_popup)
+        self.city_search = CitySearch(
+            self.popup_bg_canvas, self.location_entry, self.detail_city_var, self.search_button,
+            search=search_cities, submit=self.refresh_weather,
+            dispatch=self._call_on_ui_thread, start_worker=self._start_background_worker,
+            font=(TEXT_FONT, 10), background=POPUP_INPUT_BG,
+            max_query_length=MAX_CITY_QUERY_LENGTH,
+        )
+        self.city_search.chosen_place = self.latest_place
         self._configure_canvas_weather_icon(
             self.hero_icon_label,
             "cloud",
@@ -2289,6 +2335,25 @@ class WeatherWidget(tk.Tk):
             self.popup_bg_canvas.coords(card["temp"], center_x, forecast_top + 68)
 
         self.popup_bg_canvas.coords(self.footer_label, width - pad, height - 7)
+        self._fit_city_label()
+        self.city_search.reposition()
+
+    def _fit_city_label(self) -> None:
+        canvas = self.popup_bg_canvas
+        condition_bounds = canvas.bbox(self.today_condition_label)
+        city_coords = canvas.coords(self.hero_city_label)
+        if not condition_bounds or not city_coords:
+            return
+        available = max(0, condition_bounds[0] - city_coords[0] - 16)
+        font = tkfont.Font(self, font=canvas.itemcget(self.hero_city_label, "font"))
+        text = self.city_label_text
+        if font.measure(text) > available:
+            text = text.split(",", 1)[0]
+        if font.measure(text) > available:
+            while text and font.measure(text + "...") > available:
+                text = text[:-1]
+            text = text + "..." if font.measure("...") <= available else ""
+        canvas.itemconfigure(self.hero_city_label, text=text)
 
     def _layout_today_weather_stack(self, right_text: int, right_stack_top: int) -> None:
         self.popup_bg_canvas.coords(self.today_condition_label, right_text - 4, right_stack_top + 2)
@@ -2506,6 +2571,7 @@ class WeatherWidget(tk.Tk):
 
     def _hide_popup(self) -> None:
         if self.popup:
+            self.city_search.dismiss()
             self.popup.withdraw()
 
     def _ensure_fresh_weather(self) -> None:
@@ -2521,7 +2587,7 @@ class WeatherWidget(tk.Tk):
             self.refresh_weather()
 
     def _search_from_popup(self) -> None:
-        self.refresh_weather(self.detail_city_var.get())
+        self.city_search.confirm()
 
     def _open_open_meteo_terms(self) -> None:
         try:
@@ -2577,7 +2643,7 @@ class WeatherWidget(tk.Tk):
     def _cycle_popup_theme(self, _event: tk.Event | None = None) -> None:
         self._set_popup_theme(self._next_popup_theme_id())
 
-    def refresh_weather(self, city_override: str | None = None) -> None:
+    def refresh_weather(self, city_override: str | None = None, selected_place: dict | None = None) -> None:
         city = _normalize_city_query(
             city_override if city_override is not None else self.city_var.get()
         )
@@ -2594,15 +2660,19 @@ class WeatherWidget(tk.Tk):
         if self.fetch_in_progress:
             if city_override is not None:
                 self.pending_city_search = city
+                self.pending_city_place = selected_place
                 self.status_var.set(f"Kaupunkihaku odottaa: {city}")
+                self.popup_bg_canvas.itemconfigure(self.hero_updated_label, text="Kaupunkihaku odottaa...")
             return
 
         self.fetch_in_progress = True
         if city_override is not None:
             self.pending_city_search = None
+            self.pending_city_place = None
         self.status_var.set(f"Haetaan säätä: {city}")
+        self.popup_bg_canvas.itemconfigure(self.hero_updated_label, text="Haetaan säätä...")
         temperature_unit = self.settings.get("temperature_unit", "celsius")
-        place_hint = self.latest_place if city_override is None else None
+        place_hint = self.latest_place if city_override is None else selected_place
         self._start_background_worker(
             lambda: self._fetch_worker(city, temperature_unit, place_hint)
         )
@@ -2672,7 +2742,12 @@ class WeatherWidget(tk.Tk):
         if not city or self._is_destroying:
             return
         self.pending_city_search = None
-        self.refresh_weather(city)
+        place = self.pending_city_place
+        self.pending_city_place = None
+        if place is None:
+            self.refresh_weather(city)
+        else:
+            self.refresh_weather(city, place)
 
     def _schedule_refresh(self) -> None:
         if self.refresh_job is not None:
@@ -2713,6 +2788,7 @@ class WeatherWidget(tk.Tk):
         )
         self.popup_bg_canvas.itemconfigure(self.hero_temp_label, text=current_temp)
         self.popup_bg_canvas.itemconfigure(self.hero_city_label, text=city_text)
+        self.city_label_text = city_text
         self.popup_bg_canvas.itemconfigure(self.hero_updated_label, text=updated_text)
 
     def _apply_today_detail_metrics(
@@ -2740,6 +2816,7 @@ class WeatherWidget(tk.Tk):
             right_text = int(condition_coords[0]) + 4
             right_stack_top = int(condition_coords[1]) - 2
             self._layout_today_weather_stack(right_text, right_stack_top)
+        self._fit_city_label()
 
     def _apply_forecast_cards(self, daily: dict) -> None:
         daily_data = _as_dict(daily)
@@ -2834,10 +2911,7 @@ class WeatherWidget(tk.Tk):
 
         requested_city_text = _clean_text(requested_city)
         place_name = _clean_text(place_data.get("name"))
-        if requested_city_text and place_name and requested_city_text.casefold() == place_name.casefold():
-            normalized_city = place_name
-        else:
-            normalized_city = requested_city_text or place_name or DEFAULT_CITY
+        normalized_city = place_name or requested_city_text or DEFAULT_CITY
         self.latest_place = place_data
         self.latest_weather = weather_data
         self.last_weather_update = refreshed_at
@@ -2845,6 +2919,13 @@ class WeatherWidget(tk.Tk):
         city_changed = self.settings.get("city") != normalized_city
         if city_changed:
             self.settings["city"] = normalized_city
+        saved_place = _saved_place(place_data)
+        # Persist the exact location, not only an ambiguous name or prefix.
+        place_changed = self.settings.get("place") != saved_place
+        if saved_place is not None:
+            self.settings["place"] = saved_place
+        else:
+            self.settings.pop("place", None)
 
         self._apply_current_weather_summary(style, current_temp, city_text, f"Päivitetty {now_text}")
         self._apply_today_detail_metrics(
@@ -2861,11 +2942,11 @@ class WeatherWidget(tk.Tk):
         self.status_var.set("")
         self._update_tray_symbol(style.icon_key, f"{city_text}: {current_temp} {style.label}")
         if _normalize_city_query(self.detail_city_var.get()).casefold() == requested_city_text.casefold():
-            self.detail_city_var.set(normalized_city)
+            self.city_search.set_text(normalized_city, saved_place)
         self._apply_forecast_cards(daily)
 
         self.popup_bg_canvas.itemconfigure(self.footer_label, text=FOOTER_TEXT)
-        if city_changed or self._settings_save_pending:
+        if city_changed or place_changed or self._settings_save_pending:
             self._persist_settings()
         self.fetch_in_progress = False
         self._schedule_refresh()

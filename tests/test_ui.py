@@ -53,5 +53,17 @@ class PopupSmokeTests(unittest.TestCase):
                 self.assertTrue(canvas.itemcget(widget.hero_updated_label, "text").startswith("Päivitetty "))
                 self.assertFalse(widget.winfo_viewable())
                 self.assertFalse(widget.popup.winfo_viewable())
+
+                long_place = {"name": "Lappeenranta", "admin1": "Etelä-Karjala", "latitude": 61.05, "longitude": 28.18}
+                weather["current"]["weather_code"] = 99
+                widget._apply_weather(long_place, weather, "Lappeenranta")
+                self.assertEqual(widget.settings["place"], long_place)
+                self.assertEqual(widget.settings["city"], "Lappeenranta")
+                self.assertLess(canvas.bbox(widget.hero_city_label)[2], canvas.bbox(widget.today_condition_label)[0])
+                weather["current"]["weather_code"] = 3
+                widget._apply_weather({"name": "Espoo", "admin1": "Uusimaa"}, weather, "Espoo")
+                self.assertEqual(canvas.itemcget(widget.hero_city_label, "text"), "Espoo, Uusimaa")
+                widget._layout_popup_content(450, 329)
+                self.assertLess(canvas.bbox(widget.hero_city_label)[2], canvas.bbox(widget.today_condition_label)[0])
             finally:
                 widget.destroy()
