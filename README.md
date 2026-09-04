@@ -116,6 +116,11 @@ For a windowless launch, use:
 
 Source-mode shortcuts use this launcher so they keep working after a compatible
 Python installation is moved or upgraded.
+The launcher first checks the project's `.venv\Scripts\pythonw.exe`, then falls
+back to installed Python interpreters. Candidates must provide Python 3.10+ and
+Tkinter. If no usable interpreter can be started, the windowless launcher shows
+an error instead of silently disappearing. It does not install dependencies or
+change the selected Python environment.
 The app replaces startup and desktop shortcuts atomically: an interrupted write
 keeps the previous working link intact.
 
@@ -170,6 +175,11 @@ Search tests cover retry targets after failed city changes, confirmed searches
 across focus changes, and recovery from a suggestion worker that cannot start.
 Installer startup tests simulate a running process and immediate exits without
 launching or stopping the installed app.
+Keyboard tests exercise the popup's actual Escape binding after Enter moves
+focus to the card. Background-worker startup failures must release busy states
+so weather refresh, shortcut actions, and app updates can be retried. Launcher
+tests use an isolated temporary virtualenv and a short non-UI test program;
+they never launch the user's weather app or change its startup settings.
 
 ## Bundled Assets
 

@@ -51,7 +51,7 @@ class CitySearch(tk.Frame):
         entry.bind("<KP_Enter>", self.confirm)
         entry.bind("<Down>", lambda event: self._move(1))
         entry.bind("<Up>", lambda event: self._move(-1))
-        entry.bind("<Escape>", self._escape)
+        entry.bind("<Escape>", self.handle_escape)
         entry.bind("<FocusOut>", self._focus_out)
         self.listbox.bind("<Button-1>", self._click)
         self.listbox.bind("<Motion>", self._hover)
@@ -245,7 +245,7 @@ class CitySearch(tk.Frame):
             self.confirm()
         return "break"
 
-    def _escape(self, _event=None):
+    def handle_escape(self, _event=None):
         if self.winfo_manager() or self.confirm_pending:
             self.dismiss()
             return "break"

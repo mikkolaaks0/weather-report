@@ -108,6 +108,7 @@ class AutocompleteTests(unittest.TestCase):
             start_worker=self.workers.append, font=("Segoe UI", 10),
             background="#173B49", max_query_length=120,
         )
+        self.root.update_idletasks()
 
     def tearDown(self):
         self.root.destroy()
@@ -245,11 +246,11 @@ class AutocompleteTests(unittest.TestCase):
     def test_escape_cancels_pending_enter_and_late_response(self):
         self.variable.set("Hel")
         self.control.confirm()
-        self.assertEqual(self.control._escape(), "break")
+        self.assertEqual(self.control.handle_escape(), "break")
         self.finish_request()
         self.submit.assert_not_called()
         self.assertFalse(self.control.winfo_manager())
-        self.assertIsNone(self.control._escape())
+        self.assertIsNone(self.control.handle_escape())
 
     def test_newer_query_wins_and_only_one_network_request_runs(self):
         self.variable.set("Hel")

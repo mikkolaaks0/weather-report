@@ -725,7 +725,7 @@ class TrayMenuTests(unittest.TestCase):
         widget = object.__new__(main.WeatherWidget)
         widget.desktop_shortcut_in_progress = False
         widget.status_var = Mock()
-        widget._start_background_worker = lambda callback: callback()
+        widget._start_background_worker = lambda callback, **_kwargs: callback()
         widget._call_on_ui_thread = lambda callback: callback()
         with (
             patch.object(main, "create_desktop_shortcut", side_effect=[
@@ -792,7 +792,7 @@ class TrayMenuTests(unittest.TestCase):
         widget.startup_change_in_progress = False
         widget.status_var = Mock()
         widget.tray_icon = Mock()
-        widget._start_background_worker = lambda callback: callback()
+        widget._start_background_worker = lambda callback, **_kwargs: callback()
         widget._call_on_ui_thread = lambda callback: callback()
         with (
             patch.object(main, "is_startup_enabled", return_value=True),
@@ -1427,6 +1427,39 @@ class WeatherResultTests(unittest.TestCase):
 
 
 class ThreadDispatchTests(unittest.TestCase):
+    def test_worker_start_failure_releases_guards_and_allows_retry(self) -> None:
+        cases = (
+            ("refresh_weather", "fetch_in_progress"),
+            ("_toggle_startup_from_tray", "startup_change_in_progress"),
+            ("_create_desktop_shortcut_from_tray", "desktop_shortcut_in_progress"),
+            ("check_for_app_update", "update_check_in_progress"),
+            ("_apply_app_update", "update_check_in_progress"),
+        )
+        for action, guard in cases:
+            with self.subTest(action=action):
+                widget = WeatherResultTests.make_result_widget()
+                setattr(widget, guard, False)
+                widget.latest_weather = None
+                widget.tray_icon = None
+                widget.refresh_target = ("Espoo", None)
+                widget._call_on_ui_thread = lambda callback: callback()
+                widget.destroy = Mock()
+                with (
+                    patch.object(main, "is_startup_enabled", return_value=False),
+                    patch.object(main.threading, "Thread") as thread,
+                    patch.object(main.messagebox, "showerror") as show_error,
+                ):
+                    thread.return_value.start.side_effect = RuntimeError("cannot start new thread")
+                    run = getattr(widget, action)
+                    run(manual=True) if action == "check_for_app_update" else run()
+                    self.assertFalse(getattr(widget, guard))
+                    show_error.assert_called_once()
+                    widget.destroy.assert_not_called()
+                    thread.return_value.start.side_effect = None
+                    run(manual=True) if action == "check_for_app_update" else run()
+                    self.assertTrue(getattr(widget, guard))
+                    self.assertEqual(thread.return_value.start.call_count, 2)
+
     def test_ui_dispatch_runs_locally_or_queues_without_touching_tk(self) -> None:
         widget = object.__new__(main.WeatherWidget)
         widget._is_destroying = False

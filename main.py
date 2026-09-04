@@ -40,7 +40,7 @@ except Exception:  # noqa: BLE001
 APP_NAME = "Weather Report"
 APP_SLUG = "weather-report"
 APP_VERSION = "0.1.1"
-APP_VERSION_DATE = "04.09.2026"
+APP_VERSION_DATE = "05.09.2026"
 APP_VERSION_LABEL = APP_VERSION_DATE
 FOOTER_TEXT = (
     f"Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot "
@@ -1457,7 +1457,7 @@ class WeatherWidget(tk.Tk):
         self._build_popup()
         self._init_tray_icon()
 
-        self.bind("<Escape>", lambda _: self._hide_popup())
+        self.bind("<Escape>", self._handle_escape)
         self.after(200, self._position_widget)
         self.ui_poll_job = self.after(50, self._drain_ui_callbacks)
         self.clock_job = self.after(300, self._tick_clock)
@@ -1619,7 +1619,7 @@ class WeatherWidget(tk.Tk):
                 error_text = str(error)
             self._call_on_ui_thread(lambda: self._finish_startup_change(error_text))
 
-        self._start_background_worker(worker)
+        self._start_background_worker(worker, on_error=self._finish_startup_change)
 
     def _finish_startup_change(self, error_text: str | None) -> None:
         self.startup_change_in_progress = False
@@ -1652,7 +1652,7 @@ class WeatherWidget(tk.Tk):
                 error_text = str(error)
             self._call_on_ui_thread(lambda: self._finish_desktop_shortcut(shortcut_path, error_text))
 
-        self._start_background_worker(worker)
+        self._start_background_worker(worker, on_error=lambda error: self._finish_desktop_shortcut(None, error))
 
     def _finish_desktop_shortcut(self, shortcut_path: Path | None, error_text: str | None) -> None:
         self.desktop_shortcut_in_progress = False
@@ -1682,19 +1682,18 @@ class WeatherWidget(tk.Tk):
         if not is_startup_enabled():
             return
 
+        def report_error(error: str) -> None:
+            self.status_var.set(f"Startup-pikakuvakkeen korjaus epäonnistui: {error}")
+
         def worker() -> None:
             try:
                 with STARTUP_SHORTCUT_LOCK:
                     if is_startup_enabled():
                         set_startup_enabled(True)
             except Exception as error:  # noqa: BLE001
-                self._call_on_ui_thread(
-                    lambda error=error: self.status_var.set(
-                        f"Startup-pikakuvakkeen korjaus epäonnistui: {error}"
-                    )
-                )
+                self._call_on_ui_thread(lambda error=str(error): report_error(error))
 
-        self._start_background_worker(worker)
+        self._start_background_worker(worker, on_error=report_error)
 
     def check_for_app_update(self, manual: bool = False) -> None:
         if not manual:
@@ -1718,7 +1717,10 @@ class WeatherWidget(tk.Tk):
                 lambda status=status, manual=manual: self._handle_update_check_result(status, manual)
             )
 
-        self._start_background_worker(worker)
+        self._start_background_worker(
+            worker,
+            on_error=lambda error: self._handle_update_check_result({"state": "error", "message": error}, manual),
+        )
 
     def _handle_update_check_result(self, status: dict, manual: bool) -> None:
         state = status.get("state")
@@ -1771,7 +1773,7 @@ class WeatherWidget(tk.Tk):
                 error_text = str(error)
             self._call_on_ui_thread(lambda error_text=error_text: self._finish_app_update(error_text))
 
-        self._start_background_worker(worker)
+        self._start_background_worker(worker, on_error=self._finish_app_update)
 
     def _finish_app_update(self, error_text: str | None) -> None:
         if error_text:
@@ -1822,8 +1824,15 @@ class WeatherWidget(tk.Tk):
     def _quit_from_tray(self) -> None:
         self.destroy()
 
-    def _start_background_worker(self, target: Callable[[], None]) -> None:
-        threading.Thread(target=target, daemon=True).start()
+    def _start_background_worker(
+        self, target: Callable[[], None], *, on_error: Callable[[str], None] | None = None,
+    ) -> None:
+        try:
+            threading.Thread(target=target, daemon=True).start()
+        except RuntimeError as error:
+            if on_error is None:
+                raise
+            on_error(f"Taustatyötä ei voitu käynnistää: {error}")
 
     def _call_on_ui_thread(self, callback: Callable[[], None]) -> None:
         if self._is_destroying:
@@ -1952,7 +1961,7 @@ class WeatherWidget(tk.Tk):
         self.popup.overrideredirect(True)
         self.popup.wm_attributes("-topmost", True)
         self.popup.configure(bg=POPUP_LAYER_BG)
-        self.popup.bind("<Escape>", lambda _: self._hide_popup())
+        self.popup.bind("<Escape>", self._handle_escape)
 
         self.popup_bg_canvas = tk.Canvas(
             self.popup,
@@ -2611,6 +2620,11 @@ class WeatherWidget(tk.Tk):
             self.city_search.hide()
             self.popup.withdraw()
 
+    def _handle_escape(self, _event=None) -> str:
+        if self.city_search.handle_escape() != "break":
+            self._hide_popup()
+        return "break"
+
     def _ensure_fresh_weather(self) -> None:
         if self.fetch_in_progress:
             return
@@ -2716,7 +2730,8 @@ class WeatherWidget(tk.Tk):
         self.popup_bg_canvas.itemconfigure(self.hero_updated_label, text="Haetaan säätä...")
         temperature_unit = self.settings.get("temperature_unit", "celsius")
         self._start_background_worker(
-            lambda: self._fetch_worker(city, temperature_unit, selected_place)
+            lambda: self._fetch_worker(city, temperature_unit, selected_place),
+            on_error=self._show_error,
         )
 
     def _fetch_worker(self, city: str, temperature_unit: str, place_hint: dict | None) -> None:

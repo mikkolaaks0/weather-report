@@ -7,6 +7,40 @@ import main
 
 @unittest.skipUnless(os.name == "nt" and main.ImageTk is not None, "Windows Tk/Pillow smoke test")
 class PopupSmokeTests(unittest.TestCase):
+    def test_escape_after_enter_cancels_pending_selection_from_the_card(self) -> None:
+        settings = {"city": "Espoo", "temperature_unit": "celsius", "popup_theme": main.DEFAULT_POPUP_THEME}
+        with (
+            patch.object(main, "load_settings", return_value=settings),
+            patch.object(main, "save_settings"),
+            patch.object(main, "is_startup_enabled", return_value=False),
+            patch.object(main.WeatherWidget, "_init_tray_icon"),
+            patch.object(main.WeatherWidget, "_start_background_worker"),
+        ):
+            widget = main.WeatherWidget()
+            try:
+                control = widget.city_search
+                widget.detail_city_var.set("Hel")
+                with patch.object(control, "focus_get", return_value=control.entry):
+                    control.confirm()
+                generation = control.generation
+                # Invoke the actual toplevel binding used after Enter moves focus
+                # to the card, without showing a window or stealing desktop focus.
+                self.assertIn(str(widget.popup), widget.popup_bg_canvas.bindtags())
+                binding = widget.popup.bind("<Escape>").split("[", 1)[1].split()[0]
+                event_fields = ["0"] * len(widget._subst_format)
+                with patch.object(widget, "_hide_popup") as hide:
+                    widget.tk.call(binding, *event_fields)
+                    self.assertFalse(control.confirm_pending)
+                    hide.assert_not_called()
+                    widget.tk.call(binding, *event_fields)
+                    hide.assert_called_once()
+                with patch.object(widget, "refresh_weather") as refresh:
+                    control.submit = refresh
+                    control._receive(generation, [{"name": "Helsinki", "latitude": 60.17, "longitude": 24.94}], False)
+                    refresh.assert_not_called()
+            finally:
+                widget.destroy()
+
     def test_weather_refresh_preserves_suggestions_and_hae_confirms_selection(self) -> None:
         settings = {"city": "Espoo", "temperature_unit": "celsius", "popup_theme": main.DEFAULT_POPUP_THEME}
         espoo = {"name": "Espoo", "latitude": 60.20, "longitude": 24.65}
