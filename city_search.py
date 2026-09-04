@@ -79,6 +79,13 @@ class CitySearch(tk.Frame):
         self.message.pack_forget()
         self.place_forget()
 
+    def hide(self) -> None:
+        if self.confirm_pending:
+            self.message.pack_forget()
+            self.place_forget()
+        else:
+            self.dismiss()
+
     def set_text(self, text: str, place: dict | None = None) -> None:
         self.dismiss()
         self.editing = False
@@ -116,7 +123,10 @@ class CitySearch(tk.Frame):
                 rows, error = [], True
             self.dispatch(lambda: self._receive(generation, rows, error))
 
-        self.start_worker(worker)
+        try:
+            self.start_worker(worker)
+        except RuntimeError:
+            self._receive(generation, [], True)
 
     def _receive(self, generation: int, rows: list[dict], error: bool) -> None:
         self.inflight = False
@@ -170,7 +180,8 @@ class CitySearch(tk.Frame):
 
     def _finish_editing(self) -> None:
         self.entry.selection_clear()
-        self.master.focus_set()
+        if self.focus_get() in (self.entry, self.listbox, self.search_button):
+            self.master.focus_set()
 
     def _show_message(self, text: str) -> None:
         self.listbox.pack_forget()
@@ -242,7 +253,7 @@ class CitySearch(tk.Frame):
 
     def _outside_click(self, event) -> None:
         if event.widget not in (self.entry, self.listbox, self.search_button):
-            self.dismiss()
+            self.hide()
 
     def _focus_out(self, _event=None) -> None:
         if self.focus_job is None and not self.closed:
@@ -251,11 +262,11 @@ class CitySearch(tk.Frame):
     def _check_focus(self) -> None:
         self.focus_job = None
         focused = self.focus_get()
-        # Enter intentionally moves focus to the card while a lookup finishes.
+        # A confirmed search survives switching windows or hiding the card.
         if self.confirm_pending and focused == self.master:
             return
         if focused not in (self.entry, self.listbox, self.search_button):
-            self.dismiss()
+            self.hide()
 
     def destroy(self) -> None:
         self.closed = True

@@ -160,6 +160,27 @@ class DataFormattingTests(unittest.TestCase):
 
 
 class ServicePayloadTests(unittest.TestCase):
+    def test_forecast_dates_reject_invalid_disordered_or_mismatched_days(self) -> None:
+        for dates in (
+            [None], ["bad-date"], ["2026-02-30"], ["2026-09-04T00:00"],
+            ["2026-09-04", "2026-09-04"], ["2026-09-05", "2026-09-04"],
+            ["2026-09-04", "2026-09-06"], ["2026-09-03"],
+        ):
+            weather = {"current": {"weather_code": 3, "temperature_2m": 18, "time": "2026-09-04T00:15"},
+                       "daily": {"time": dates}}
+            with self.subTest(dates=dates), self.assertRaises(main.WeatherServiceError):
+                main.validate_weather_payload(weather)
+
+    def test_forecast_uses_location_date_and_allows_missing_optional_metrics(self) -> None:
+        weather = {"current": {"weather_code": 3, "temperature_2m": 18, "time": "2026-09-04T23:30-10:00"},
+                   "daily": {"time": ["2026-09-03", "2026-09-04", "2026-09-05"]}}
+        main.validate_weather_payload(weather)
+        self.assertEqual(main._today_forecast_index(weather), 1)
+        for value in (None, "invalid"):
+            weather["current"]["time"] = value
+            with self.assertRaises(main.WeatherServiceError):
+                main.validate_weather_payload(weather)
+
     def test_json_client_closes_http_errors_without_a_retry_wrapper(self) -> None:
         body = io.BytesIO(b"unavailable")
         error = HTTPError("https://example.invalid", 503, "unavailable", None, body)
@@ -1124,6 +1145,94 @@ class WeatherResultTests(unittest.TestCase):
         widget.pending_city_search = None
         return widget
 
+    def test_failed_city_change_keeps_the_selected_location_as_retry_target(self) -> None:
+        widget = self.make_result_widget("Espoo")
+        old_place = {"name": "Espoo", "latitude": 60.2, "longitude": 24.65}
+        new_place = {"name": "Richmond", "latitude": 49.17, "longitude": -123.14}
+        weather = {"current": {"weather_code": 3, "temperature_2m": 18}, "daily": {"time": ["2026-09-04"]}}
+        widget._persist_settings = Mock()
+        widget._apply_weather(old_place, weather, "Espoo")
+        widget._start_background_worker = Mock()
+        widget._call_on_ui_thread = lambda callback: callback()
+        with (
+            patch.object(main, "get_weather", side_effect=URLError("offline")),
+            patch.object(main, "geocode_city") as geocode,
+            patch.object(main.time, "sleep"),
+            patch.object(main.messagebox, "showerror"),
+        ):
+            widget.refresh_weather("Richmond", new_place)
+            widget._start_background_worker.call_args.args[0]()
+        geocode.assert_not_called()
+        self.assertIs(widget.latest_weather, weather)
+        self.assertEqual(widget.latest_place, old_place)
+        self.assertEqual(widget.settings["city"], "Espoo")
+        self.assertFalse(widget.fetch_in_progress)
+        widget._fetch_worker = Mock()
+        widget.refresh_weather()
+        widget._start_background_worker.call_args.args[0]()
+        widget._fetch_worker.assert_called_once_with("Richmond", "celsius", new_place)
+
+    def test_rejected_search_does_not_change_the_retry_target(self) -> None:
+        widget = self.make_result_widget()
+        widget.refresh_target = ("Espoo", None)
+        with patch.object(main.messagebox, "showinfo"):
+            widget.refresh_weather("  ")
+            widget.refresh_weather("a" * (main.MAX_CITY_QUERY_LENGTH + 1))
+        self.assertEqual(widget.refresh_target, ("Espoo", None))
+
+    def test_unknown_city_does_not_replace_the_automatic_refresh_target(self) -> None:
+        widget = self.make_result_widget("Not a real city")
+        old_place = {"name": "Espoo", "latitude": 60.2, "longitude": 24.65}
+        weather = {"current": {"weather_code": 3, "temperature_2m": 18}, "daily": {"time": ["2026-09-04"]}}
+        widget._persist_settings = Mock()
+        widget._apply_weather(old_place, weather, "Espoo")
+        widget.city_var.get.return_value = "Espoo"
+        widget._start_background_worker = Mock()
+        widget._call_on_ui_thread = lambda callback: callback()
+        with (
+            patch.object(main, "geocode_city", side_effect=main.CityNotFoundError("Not found")),
+            patch.object(main.messagebox, "showerror") as show_error,
+        ):
+            widget.refresh_weather("Not a real city")
+            widget._start_background_worker.call_args.args[0]()
+        show_error.assert_called_once()
+        self.assertEqual(widget.detail_city_var.get(), "Not a real city")
+        widget._fetch_worker = Mock()
+        widget.refresh_weather()
+        widget._start_background_worker.call_args.args[0]()
+        widget._fetch_worker.assert_called_once_with("Espoo", "celsius", old_place)
+
+    def test_daily_metrics_and_forecast_start_at_the_current_location_day(self) -> None:
+        widget = self.make_result_widget()
+        weather = {
+            "current": {"weather_code": 3, "temperature_2m": 18, "time": "2026-09-04T23:30-10:00"},
+            "daily": {
+                "time": ["2026-09-03", "2026-09-04", "2026-09-05"],
+                "temperature_2m_max": [90, 20, 21], "temperature_2m_min": [80, 10, 11],
+                "precipitation_sum": [99, 2.5, 3], "precipitation_probability_max": [99, 30, 40],
+                "sunrise": ["2026-09-03T08:00", "2026-09-04T06:15", "2026-09-05T06:16"],
+                "sunset": ["2026-09-03T18:00", "2026-09-04T20:15", "2026-09-05T20:16"],
+            },
+        }
+        widget._apply_weather({"name": "Espoo"}, weather, "Espoo")
+        metrics = widget._apply_today_detail_metrics.call_args.kwargs
+        self.assertEqual(metrics["high_low_text"], "ylin 20°C / alin 10°C")
+        self.assertEqual(metrics["rain_mm"], "2.5 mm")
+        self.assertEqual(metrics["rain_probability"], "30%")
+        self.assertEqual((metrics["sunrise"], metrics["sunset"]), ("06:15", "20:15"))
+        widget._apply_forecast_cards.assert_called_once_with(weather["daily"], start_index=2)
+
+    def test_bad_forecast_does_not_replace_the_last_good_data_or_settings(self) -> None:
+        widget = self.make_result_widget()
+        weather = {"current": {"weather_code": 3, "temperature_2m": 18}, "daily": {"time": ["2026-09-04"]}}
+        widget._apply_weather({"name": "Espoo"}, weather, "Espoo")
+        invalid = {"current": weather["current"], "daily": {"time": [None]}}
+        with patch.object(main.messagebox, "showerror"):
+            widget._handle_weather_result({"name": "Turku"}, invalid, "Turku")
+        self.assertIs(widget.latest_weather, weather)
+        self.assertEqual(widget.settings["city"], "Espoo")
+        self.assertFalse(widget.fetch_in_progress)
+
     def test_superseded_weather_success_does_not_replace_the_selected_city(self) -> None:
         widget = self.make_result_widget("Richmond")
         widget.fetch_in_progress = True
@@ -1139,8 +1248,10 @@ class WeatherResultTests(unittest.TestCase):
         widget.fetch_in_progress = True
         widget.latest_weather = None
         widget.pending_city_search = "Espoo"
+        widget.refresh_target = ("Espoo", None)
         with patch.object(main.messagebox, "showerror") as show_error:
-            widget._show_error("Old city not found", notify_user=True)
+            widget._show_error("Old city not found", notify_user=True, retry_previous_location=True)
+        self.assertEqual(widget.refresh_target, ("Espoo", None))
         show_error.assert_not_called()
         widget._update_tray_symbol.assert_not_called()
         widget._schedule_refresh.assert_not_called()

@@ -171,7 +171,11 @@ class AutocompleteTests(unittest.TestCase):
 
     def test_confirmation_blurs_field_without_canceling_pending_lookup(self):
         self.variable.set("Hel")
-        with patch.object(self.canvas, "focus_set") as focus, patch.object(self.entry, "selection_clear") as selection:
+        with (
+            patch.object(self.canvas, "focus_set") as focus,
+            patch.object(self.entry, "selection_clear") as selection,
+            patch.object(self.control, "focus_get", return_value=self.entry),
+        ):
             self.control.confirm()
             focus.assert_called_once()
             selection.assert_called_once()
@@ -183,10 +187,48 @@ class AutocompleteTests(unittest.TestCase):
 
     def test_confirming_visible_result_also_finishes_editing(self):
         self.results_for()
-        with patch.object(self.canvas, "focus_set") as focus:
+        with patch.object(self.canvas, "focus_set") as focus, patch.object(self.control, "focus_get", return_value=self.entry):
             self.control.confirm()
         focus.assert_called_once()
         self.assertFalse(self.control.confirm_pending)
+
+    def test_confirmed_search_survives_hiding_and_never_steals_focus_on_completion(self):
+        for action in ("hide", "focus_out", "outside_click"):
+            with self.subTest(action=action):
+                self.variable.set("Hel")
+                self.control.confirm()
+                with patch.object(self.control, "focus_get", return_value=None), patch.object(self.canvas, "focus_set") as focus:
+                    if action == "hide":
+                        self.control.hide()
+                    elif action == "focus_out":
+                        self.control._check_focus()
+                    else:
+                        self.control._outside_click(SimpleNamespace(widget=self.canvas))
+                    self.assertTrue(self.control.confirm_pending)
+                    self.assertFalse(self.control.winfo_manager())
+                    self.control.reposition()
+                    self.assertFalse(self.control.winfo_manager())
+                    self.finish_request()
+                    focus.assert_not_called()
+                self.submit.assert_called_once_with("Helsinki", place())
+                self.submit.reset_mock()
+
+    def test_hiding_unconfirmed_suggestions_discards_their_late_result(self):
+        self.variable.set("Hel")
+        self.control._request()
+        self.control.hide()
+        self.finish_request()
+        self.assertFalse(self.control.winfo_manager())
+        self.assertEqual(self.control.rows, [])
+        self.submit.assert_not_called()
+
+    def test_worker_start_failure_allows_the_next_lookup(self):
+        self.variable.set("Hel")
+        with patch.object(self.control, "start_worker", side_effect=RuntimeError("thread limit")):
+            self.control._request()
+        self.assertFalse(self.control.inflight)
+        self.results_for("Espoo")
+        self.assertTrue(self.control.rows)
 
     def test_arrows_and_enter_choose_another_result(self):
         self.results_for()

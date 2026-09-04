@@ -124,6 +124,20 @@ function New-Shortcut {
     $shortcut.Save()
 }
 
+function Start-InstalledApplication {
+    param([string]$ExecutablePath, [string]$WorkingDirectory)
+
+    $process = Start-Process -FilePath $ExecutablePath -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -PassThru
+    try {
+        if ($process.WaitForExit(1500)) {
+            throw "The new application exited during startup (code $($process.ExitCode))."
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
 function Get-ShortcutSnapshot {
     param([string[]]$Paths)
 
@@ -339,7 +353,7 @@ if ($Startup -or $startupWasEnabled) {
 }
 
 if (-not $NoLaunch) {
-    Start-Process -FilePath $exePath -WorkingDirectory $appDir -WindowStyle Hidden
+    Start-InstalledApplication -ExecutablePath $exePath -WorkingDirectory $appDir
 }
 
 if (Test-Path -LiteralPath $backupDir) {

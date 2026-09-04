@@ -166,6 +166,29 @@ try {
 
     & {
         . (Get-ScriptFunctions 'install.ps1')
+        foreach ($exitCode in @($null, 0, 1)) {
+            $process = [pscustomobject]@{ ExitCode = $exitCode; Disposed = $false }
+            $process | Add-Member ScriptMethod WaitForExit {
+                param($timeout)
+                Assert-True ($timeout -eq 1500) 'Startup probe must be bounded'
+                return $null -ne $this.ExitCode
+            }
+            $process | Add-Member ScriptMethod Dispose { $this.Disposed = $true }
+            function Start-Process {
+                param($FilePath, $WorkingDirectory, $WindowStyle, [switch]$PassThru)
+                Assert-True ($WindowStyle -eq 'Hidden' -and $PassThru) 'Incorrect app launch options'
+                return $process
+            }
+            $rejected = $false
+            try { Start-InstalledApplication -ExecutablePath 'app.exe' -WorkingDirectory $testDir }
+            catch { $rejected = $true }
+            Assert-True ($rejected -eq ($null -ne $exitCode)) 'Early app exit was not detected'
+            Assert-True $process.Disposed 'Startup probe leaked the process handle'
+        }
+    }
+
+    & {
+        . (Get-ScriptFunctions 'install.ps1')
         $apiUrl = 'https://example.invalid/releases/latest'
         function Invoke-RestMethod {
             param($Uri, $Headers, $TimeoutSec)

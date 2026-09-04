@@ -19,6 +19,8 @@ from the system tray.
 - Near-term precipitation probability based on the next 6 hours
 - Automatic weather refresh every 30 minutes
 - Failed refreshes are marked on the popup while keeping the last valid forecast
+- Network failures during a city change retry the selected location, not the old city
+- Daily metrics and forecast days follow the location's date, including across midnight
 - Optional startup shortcut for Windows login, updated without blocking the popup
 - Desktop shortcut creation from the tray, also without blocking the popup
 - Automatic startup check and manual tray update check when running from a Git checkout
@@ -65,6 +67,10 @@ installation step fails after replacement, recovery restores the previous app
 directory and the original desktop, Start Menu, and startup shortcuts, including
 removing shortcuts that were created by the failed attempt. Recovery errors are
 reported rather than treated as a successful installation.
+When launching is enabled, the installer watches for an immediate exit of the
+new app for 1.5 seconds before removing the previous version's backup. An early
+exit triggers the same recovery path; this is a startup check, not a full health
+check of the running app.
 
 To uninstall the portable install:
 
@@ -88,6 +94,12 @@ and removes keyboard focus from the city field. Escape dismisses suggestions;
 another Escape hides the popup. If suggestions are unavailable, confirmation
 falls back to the regular name search. Selected coordinates are remembered across
 refreshes and restarts, so same-named cities do not silently change location.
+After confirmation, switching windows or hiding the popup does not cancel the
+search or let its completion steal keyboard focus. Escape or editing the query
+still cancels a pending suggestion selection. If a confirmed location's weather
+request fails temporarily, refresh retries that location while keeping the last
+good forecast visible. A name that cannot be found leaves refresh targeting the
+previous location until another search is submitted.
 Suggestions use the existing Open-Meteo geocoding service, with no location
 permission or additional dependencies. See its [matching rules](https://open-meteo.com/en/docs/geocoding-api).
 
@@ -152,6 +164,12 @@ tray failure cannot interrupt forecast rendering or the next scheduled refresh.
 Superseded weather results and errors are ignored when a newer city search is
 queued. Tests also cover same-name autocomplete interactions during refresh and
 atomic shortcut replacement, including interrupted writes and locked files.
+Forecast tests reject malformed or inconsistent dates without replacing valid
+data, and check that daily metrics use the current date at the selected location.
+Search tests cover retry targets after failed city changes, confirmed searches
+across focus changes, and recovery from a suggestion worker that cannot start.
+Installer startup tests simulate a running process and immediate exits without
+launching or stopping the installed app.
 
 ## Bundled Assets
 

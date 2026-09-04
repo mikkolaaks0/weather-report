@@ -11,7 +11,7 @@ import time
 import tkinter as tk
 import webbrowser
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from http.client import IncompleteRead
 from pathlib import Path
 from tkinter import messagebox
@@ -836,8 +836,29 @@ def validate_weather_payload(weather: object) -> None:
         raise WeatherServiceError("Sääpalvelun vastauksesta puuttui kelvollinen säätilakoodi.")
     if _coerce_number(current.get("temperature_2m")) is None:
         raise WeatherServiceError("Sääpalvelun vastauksesta puuttui lämpötila.")
-    if not _as_list(daily.get("time")):
+    dates = _as_list(daily.get("time"))
+    if not dates:
         raise WeatherServiceError("Sääpalvelun vastauksesta puuttui päiväennuste.")
+    parsed_dates = []
+    for value in dates:
+        try:
+            parsed = date.fromisoformat(value)
+        except (TypeError, ValueError):
+            raise WeatherServiceError("Päiväennusteen päivämäärä oli virheellinen.") from None
+        if value != parsed.isoformat() or (parsed_dates and parsed - parsed_dates[-1] != timedelta(days=1)):
+            raise WeatherServiceError("Päiväennusteen päivämäärät eivät olleet peräkkäisiä.")
+        parsed_dates.append(parsed)
+    if "time" in current:
+        current_time = _parse_open_meteo_time(current["time"])
+        if current_time is None or current_time.date() not in parsed_dates:
+            raise WeatherServiceError("Nykytila ja päiväennuste eivät kohdistuneet samalle päivälle.")
+
+
+def _today_forecast_index(weather: dict) -> int:
+    current_time = _parse_open_meteo_time(_as_dict(weather.get("current")).get("time"))
+    if current_time is None:
+        return 0
+    return weather["daily"]["time"].index(current_time.date().isoformat())
 
 
 def resolve_weather_style(code: int | float | str | None, is_day: bool = True) -> WeatherStyle:
@@ -1409,6 +1430,7 @@ class WeatherWidget(tk.Tk):
         self.popup: tk.Toplevel | None = None
         self.forecast_cards: list[dict] = []
         self.latest_place: dict | None = self.settings.get("place")
+        self.refresh_target = (self.city_var.get(), self.latest_place)
         self.latest_weather: dict | None = None
         self.last_weather_update: datetime | None = None
         self.tray_icon = None
@@ -2586,7 +2608,7 @@ class WeatherWidget(tk.Tk):
 
     def _hide_popup(self) -> None:
         if self.popup:
-            self.city_search.dismiss()
+            self.city_search.hide()
             self.popup.withdraw()
 
     def _ensure_fresh_weather(self) -> None:
@@ -2659,9 +2681,12 @@ class WeatherWidget(tk.Tk):
         self._set_popup_theme(self._next_popup_theme_id())
 
     def refresh_weather(self, city_override: str | None = None, selected_place: dict | None = None) -> None:
-        city = _normalize_city_query(
-            city_override if city_override is not None else self.city_var.get()
-        )
+        if city_override is None:
+            city_override, selected_place = self.refresh_target
+            explicit_search = False
+        else:
+            explicit_search = True
+        city = _normalize_city_query(city_override)
         if not city:
             messagebox.showinfo(APP_NAME, "Kirjoita paikkakunnan nimi.")
             return
@@ -2672,8 +2697,11 @@ class WeatherWidget(tk.Tk):
             )
             return
 
+        if explicit_search:
+            self.refresh_target = (city, selected_place)
+
         if self.fetch_in_progress:
-            if city_override is not None:
+            if explicit_search:
                 self.pending_city_search = city
                 self.pending_city_place = selected_place
                 self.status_var.set(f"Kaupunkihaku odottaa: {city}")
@@ -2681,15 +2709,14 @@ class WeatherWidget(tk.Tk):
             return
 
         self.fetch_in_progress = True
-        if city_override is not None:
+        if explicit_search:
             self.pending_city_search = None
             self.pending_city_place = None
         self.status_var.set(f"Haetaan säätä: {city}")
         self.popup_bg_canvas.itemconfigure(self.hero_updated_label, text="Haetaan säätä...")
         temperature_unit = self.settings.get("temperature_unit", "celsius")
-        place_hint = self.latest_place if city_override is None else selected_place
         self._start_background_worker(
-            lambda: self._fetch_worker(city, temperature_unit, place_hint)
+            lambda: self._fetch_worker(city, temperature_unit, selected_place)
         )
 
     def _fetch_worker(self, city: str, temperature_unit: str, place_hint: dict | None) -> None:
@@ -2715,7 +2742,9 @@ class WeatherWidget(tk.Tk):
             )
         except CityNotFoundError as error:
             message = str(error)
-            self._call_on_ui_thread(lambda message=message: self._show_error(message, notify_user=True))
+            self._call_on_ui_thread(
+                lambda message=message: self._show_error(message, notify_user=True, retry_previous_location=True)
+            )
         except (URLError, TimeoutError, ConnectionError, IncompleteRead):
             self._call_on_ui_thread(lambda: self._show_error("Verkkovirhe. Tarkista internet-yhteys."))
         except WeatherServiceError as error:
@@ -2737,11 +2766,13 @@ class WeatherWidget(tk.Tk):
         except Exception:  # noqa: BLE001
             self._show_error("Säädatan käsittely epäonnistui.")
 
-    def _show_error(self, text: str, notify_user: bool = False) -> None:
+    def _show_error(self, text: str, notify_user: bool = False, retry_previous_location: bool = False) -> None:
         self.fetch_in_progress = False
         if self.pending_city_search:
             self._run_pending_city_search()
             return
+        if retry_previous_location:
+            self.refresh_target = (self.city_var.get(), self.latest_place)
         self.status_var.set(f"Päivitys epäonnistui: {text} Yritetään uudelleen 30 minuutin päästä.")
         self.popup_bg_canvas.itemconfigure(self.hero_updated_label, text="Päivitys epäonnistui")
         # Keep the last successful weather symbol in tray after transient fetch errors.
@@ -2840,7 +2871,7 @@ class WeatherWidget(tk.Tk):
             self._layout_today_weather_stack(right_text, right_stack_top)
         self._fit_city_label()
 
-    def _apply_forecast_cards(self, daily: dict) -> None:
+    def _apply_forecast_cards(self, daily: dict, start_index: int = 1) -> None:
         daily_data = _as_dict(daily)
         dates = _as_list(daily_data.get("time"))
         code_list = _as_list(daily_data.get("weather_code"))
@@ -2848,7 +2879,7 @@ class WeatherWidget(tk.Tk):
         t_max = _as_list(daily_data.get("temperature_2m_max"))
 
         for index, card in enumerate(self.forecast_cards):
-            data_index = index + 1
+            data_index = index + start_index
             if data_index >= len(dates):
                 self.popup_bg_canvas.itemconfigure(card["day"], text="-")
                 self.popup_bg_canvas.coords(card["icon"], card.get("center_x", 0), card.get("icon_y", 0))
@@ -2891,6 +2922,7 @@ class WeatherWidget(tk.Tk):
         daily = _as_dict(weather_data.get("daily"))
         current_units = _as_dict(weather_data.get("current_units"))
         daily_units = _as_dict(weather_data.get("daily_units"))
+        today_index = _today_forecast_index(weather_data)
 
         unit_text = _clean_text(current_units.get("temperature_2m")) or f"°{self.unit_symbol}"
         unit_symbol = unit_text.replace("°", "")
@@ -2910,19 +2942,19 @@ class WeatherWidget(tk.Tk):
         sunset_list = _as_list(daily.get("sunset"))
 
         rain_mm_unit = _clean_text(daily_units.get("precipitation_sum")) or "mm"
-        today_high = format_temperature(_sequence_item(t_max), self.unit_symbol)
-        today_low = format_temperature(_sequence_item(t_min), self.unit_symbol)
+        today_high = format_temperature(_sequence_item(t_max, today_index), self.unit_symbol)
+        today_low = format_temperature(_sequence_item(t_min, today_index), self.unit_symbol)
         humidity_pct = format_metric(current.get("relative_humidity_2m"), "%")
         next_hours_rain_prob = max_precipitation_probability_next_hours(weather_data)
         if next_hours_rain_prob is not None:
             today_rain_prob = f"{next_hours_rain_prob}%"
         else:
-            today_rain_prob = format_metric(_sequence_item(daily_rain_prob), "%")
-        today_rain_mm = format_metric(_sequence_item(rain_sum), f" {rain_mm_unit}", decimals=1)
+            today_rain_prob = format_metric(_sequence_item(daily_rain_prob, today_index), "%")
+        today_rain_mm = format_metric(_sequence_item(rain_sum, today_index), f" {rain_mm_unit}", decimals=1)
         wind_speed_ms = format_metric(current.get("wind_speed_10m"), " m/s", decimals=1)
         wind_direction = format_wind_direction(current.get("wind_direction_10m"))
-        today_sunrise = format_time_short(_sequence_item(sunrise_list))
-        today_sunset = format_time_short(_sequence_item(sunset_list))
+        today_sunrise = format_time_short(_sequence_item(sunrise_list, today_index))
+        today_sunset = format_time_short(_sequence_item(sunset_list, today_index))
 
         if wind_speed_ms == "-":
             wind_text = "-"
@@ -2942,6 +2974,7 @@ class WeatherWidget(tk.Tk):
         if city_changed:
             self.settings["city"] = normalized_city
         saved_place = _saved_place(place_data)
+        self.refresh_target = (normalized_city, saved_place)
         # Persist the exact location, not only an ambiguous name or prefix.
         place_changed = self.settings.get("place") != saved_place
         if saved_place is not None:
@@ -2968,7 +3001,7 @@ class WeatherWidget(tk.Tk):
             and _normalize_city_query(self.detail_city_var.get()).casefold() == requested_city_text.casefold()
         ):
             self.city_search.set_text(normalized_city, saved_place)
-        self._apply_forecast_cards(daily)
+        self._apply_forecast_cards(daily, start_index=today_index + 1)
 
         self.popup_bg_canvas.itemconfigure(self.footer_label, text=FOOTER_TEXT)
         if city_changed or place_changed or self._settings_save_pending:
