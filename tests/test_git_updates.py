@@ -37,9 +37,10 @@ class GitUpdateIntegrationTests(unittest.TestCase):
                     actual = Path(main._git_output(["rev-parse", "--show-toplevel"]))
                     common = app / main._git_output(["rev-parse", "--git-common-dir"])
                     index = app / main._git_output(["rev-parse", "--git-path", "index"])
-                self.assertEqual(actual, app)
-                self.assertEqual(common, app / ".git")
-                self.assertEqual(index, app / ".git" / "index")
+                    # Windows temp paths may use 8.3 aliases that Git expands.
+                    self.assertEqual(actual.resolve(), app.resolve())
+                    self.assertEqual(common.resolve(), (app / ".git").resolve())
+                    self.assertEqual(index.resolve(), (app / ".git" / "index").resolve())
 
     def test_git_output_preserves_international_filenames(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
