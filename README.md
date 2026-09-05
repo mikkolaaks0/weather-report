@@ -121,6 +121,8 @@ back to installed Python interpreters. Candidates must provide Python 3.10+ and
 Tkinter. If no usable interpreter can be started, the windowless launcher shows
 an error instead of silently disappearing. It does not install dependencies or
 change the selected Python environment.
+The local `.venv` is excluded from Git status so installing its dependencies does
+not block source updates.
 The app replaces startup and desktop shortcuts atomically: an interrupted write
 keeps the previous working link intact.
 
@@ -152,34 +154,24 @@ dependencies:
 python -m unittest discover -s tests -v
 ```
 
-The tests cover Open-Meteo payload validation and retry behavior, formatting and
-time-window logic, settings persistence, autocomplete keyboard selection, stale
-search responses and exact-location persistence, redirected Windows shortcut paths, Git
-update safety, release and installer invariants, all mapped WMO weather codes,
-tray rendering, icon source pairs, PNG transparency, and the PyInstaller asset
-manifest. On Windows, the suite also creates and inspects temporary `.lnk` files
-and renders a hidden Tk popup. Temporary local Git repositories exercise actual
-update, restart-detection, and conflict paths without contacting GitHub. Installer
-process selection and release-source checks run in isolation: the suite does not
-install the app or modify the user's startup shortcuts. The installer's failure
-handler is exercised using temporary program directories and shortcut snapshots.
-Transport interruption tests check bounded retries and closed HTTP error responses.
-Tray tests cover Windows tooltip limits (including UTF-16 text) and verify that a
-tray failure cannot interrupt forecast rendering or the next scheduled refresh.
-Superseded weather results and errors are ignored when a newer city search is
-queued. Tests also cover same-name autocomplete interactions during refresh and
-atomic shortcut replacement, including interrupted writes and locked files.
-Forecast tests reject malformed or inconsistent dates without replacing valid
-data, and check that daily metrics use the current date at the selected location.
-Search tests cover retry targets after failed city changes, confirmed searches
-across focus changes, and recovery from a suggestion worker that cannot start.
-Installer startup tests simulate a running process and immediate exits without
-launching or stopping the installed app.
-Keyboard tests exercise the popup's actual Escape binding after Enter moves
-focus to the card. Background-worker startup failures must release busy states
-so weather refresh, shortcut actions, and app updates can be retried. Launcher
-tests use an isolated temporary virtualenv and a short non-UI test program;
-they never launch the user's weather app or change its startup settings.
+Coverage includes:
+
+- Weather payloads, bounded network retries, closed HTTP error responses,
+  local-date alignment, precipitation windows, and all mapped WMO codes.
+- Autocomplete selection, Enter/Escape bindings, focus changes, superseded
+  responses, exact-location persistence, and retry targets after failures.
+- Hidden Tk rendering, icon dimensions and transparency, tray failures and
+  tooltip limits, background-worker failures, and timer replacement/cleanup.
+- Atomic settings and shortcut writes, redirected Windows folders, installer
+  rollback, early-exit detection, and source-launcher interpreter selection.
+- Git fast-forward/conflict handling, restart detection, inherited repository
+  overrides, Unicode paths, hidden untracked files, and release-source validation.
+
+Windows tests render a hidden popup and inspect temporary `.lnk` files. Git tests
+use local repositories without contacting GitHub. Installer and launcher tests
+use temporary directories, shortcut snapshots, and an isolated virtualenv with a
+short non-UI test program. They do not install the app, launch the user's weather
+app, or modify the user's startup settings.
 
 ## Bundled Assets
 
@@ -222,6 +214,9 @@ the Windows installer metadata.
 Publishing checks that the branch, commit, and working tree did not change during
 the build, and tags the exact commit that was built. Automatic patch numbering
 uses stable version tags, ignoring prerelease tags.
+The release script verifies the repository root and refuses inherited
+repository-local Git overrides before publishing. Untracked files block release
+publishing even when Git is configured to hide them from status output.
 
 The one-line installer uses the latest GitHub Release and verifies the portable
 zip when `SHA256SUMS.txt` is present.
@@ -252,6 +247,13 @@ branches skip the automatic update path to avoid pulling `main` into local
 development work. Source runs also perform the same non-destructive update check
 shortly after startup. The check reports the running version and offers a restart
 when the checkout has already changed while the app was open.
+Manual checks cancel the pending startup check, so the same update is not
+offered again seconds later. An early weather request likewise replaces the
+startup weather request; each completed request schedules the next refresh.
+The updater clears inherited repository-local Git context and reads Git output
+as UTF-8, keeping commands scoped to this checkout and supporting international
+filenames on Windows. Untracked files remain a reason to skip automatic updates
+even when Git's status configuration normally hides them.
 That local restart check works without an internet connection. Only one update
 can run at a time, including confirmation and restart. In-app restarts reuse the
 working Python environment instead of searching for another Python installation.

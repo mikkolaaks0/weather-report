@@ -40,7 +40,7 @@ except Exception:  # noqa: BLE001
 APP_NAME = "Weather Report"
 APP_SLUG = "weather-report"
 APP_VERSION = "0.1.1"
-APP_VERSION_DATE = "05.09.2026"
+APP_VERSION_DATE = "06.09.2026"
 APP_VERSION_LABEL = APP_VERSION_DATE
 FOOTER_TEXT = (
     f"Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot "
@@ -63,6 +63,12 @@ POPUP_FORECAST_DAYS = max(1, FORECAST_DAYS - 1)
 RAIN_PROBABILITY_LOOKAHEAD_HOURS = 6
 UPDATE_REMOTE = "origin"
 UPDATE_BRANCH = "main"
+GIT_REPOSITORY_ENV_VARS = {
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+}
 PROJECT_DIR = Path(__file__).resolve().parent
 RUNTIME_DIR = Path(getattr(sys, "_MEIPASS", PROJECT_DIR))
 IS_FROZEN = bool(getattr(sys, "frozen", False))
@@ -1271,12 +1277,19 @@ def _run_git_command(args: list[str], timeout: int = 30) -> subprocess.Completed
     if not git_path:
         raise FileNotFoundError("Git-komentoa ei löytynyt PATHista.")
 
+    # A launcher or Git hook can carry another repository's local context.
+    environment = {
+        key: value for key, value in os.environ.items()
+        if key not in GIT_REPOSITORY_ENV_VARS and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
+    }
+    environment.update(GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="Never")
     return subprocess.run(
         [git_path, "-C", str(PROJECT_DIR), *args],
         check=False,
         capture_output=True,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "Never"},
-        text=True,
+        env=environment,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         **_hidden_subprocess_kwargs(),
     )
@@ -1321,7 +1334,7 @@ def check_github_update_status() -> dict:
             ),
         }
 
-    status = _git_output(["status", "--porcelain"])
+    status = _git_output(["status", "--porcelain", "--untracked-files=normal"])
     if status:
         return {"state": "dirty", "message": "Paikallisia muutoksia on auki, päivitystä ei tehdä automaattisesti."}
 
@@ -1367,7 +1380,7 @@ def apply_github_update() -> None:
             f"{UPDATE_BRANCH}-branchissa. Nykyinen branch: {branch_label}."
         )
 
-    if _git_output(["status", "--porcelain"]):
+    if _git_output(["status", "--porcelain", "--untracked-files=normal"]):
         raise RuntimeError("Paikallisia muutoksia on auki, päivitystä ei tehdä automaattisesti.")
 
     try:
@@ -1427,6 +1440,8 @@ class WeatherWidget(tk.Tk):
         self.update_job: str | None = None
         self.restart_job: str | None = None
         self.ui_poll_job: str | None = None
+        self.position_job: str | None = None
+        self.startup_job: str | None = None
         self.popup: tk.Toplevel | None = None
         self.forecast_cards: list[dict] = []
         self.latest_place: dict | None = self.settings.get("place")
@@ -1458,13 +1473,13 @@ class WeatherWidget(tk.Tk):
         self._init_tray_icon()
 
         self.bind("<Escape>", self._handle_escape)
-        self.after(200, self._position_widget)
+        self.position_job = self.after(200, self._position_widget)
         self.ui_poll_job = self.after(50, self._drain_ui_callbacks)
         self.clock_job = self.after(300, self._tick_clock)
         self.bootstrap_job = self.after(700, self.refresh_weather)
         if not IS_FROZEN:
             self.update_job = self.after(UPDATE_CHECK_DELAY_MS, self.check_for_app_update)
-        self.after(1500, self._refresh_startup_shortcut_if_enabled)
+        self.startup_job = self.after(1500, self._refresh_startup_shortcut_if_enabled)
 
     def _persist_settings(self) -> None:
         was_pending = self._settings_save_pending
@@ -1679,6 +1694,7 @@ class WeatherWidget(tk.Tk):
         self.status_var.set("Asetuksissa: Muut ilmaisinalueen kuvakkeet -> Weather Report päälle.")
 
     def _refresh_startup_shortcut_if_enabled(self) -> None:
+        self._cancel_job("startup_job")
         if not is_startup_enabled():
             return
 
@@ -1696,8 +1712,7 @@ class WeatherWidget(tk.Tk):
         self._start_background_worker(worker, on_error=report_error)
 
     def check_for_app_update(self, manual: bool = False) -> None:
-        if not manual:
-            self.update_job = None
+        self._cancel_job("update_job")
 
         if self.update_check_in_progress:
             if manual:
@@ -1862,6 +1877,15 @@ class WeatherWidget(tk.Tk):
         if not self._is_destroying:
             self.ui_poll_job = self.after(50, self._drain_ui_callbacks)
 
+    def _cancel_job(self, job_name: str) -> None:
+        job_id = vars(self).get(job_name)
+        setattr(self, job_name, None)
+        if job_id is not None:
+            try:
+                self.after_cancel(job_id)
+            except tk.TclError:
+                pass
+
     def destroy(self) -> None:
         if self._is_destroying:
             return
@@ -1869,15 +1893,11 @@ class WeatherWidget(tk.Tk):
         if self._settings_save_pending:
             save_settings(self.settings)
 
-        for job_name in ("clock_job", "refresh_job", "bootstrap_job", "update_job", "restart_job", "ui_poll_job"):
-            job_id = getattr(self, job_name, None)
-            if job_id is None:
-                continue
-            try:
-                self.after_cancel(job_id)
-            except tk.TclError:
-                pass
-            setattr(self, job_name, None)
+        for job_name in (
+            "clock_job", "refresh_job", "bootstrap_job", "update_job", "restart_job",
+            "ui_poll_job", "position_job", "startup_job",
+        ):
+            self._cancel_job(job_name)
 
         self._stop_tray_icon()
         super().destroy()
@@ -2551,6 +2571,7 @@ class WeatherWidget(tk.Tk):
         )
 
     def _position_widget(self) -> None:
+        self._cancel_job("position_job")
         self.update_idletasks()
         width = 322
         height = 84
@@ -2711,6 +2732,8 @@ class WeatherWidget(tk.Tk):
             )
             return
 
+        self._cancel_job("bootstrap_job")
+        self._cancel_job("refresh_job")
         if explicit_search:
             self.refresh_target = (city, selected_place)
 
@@ -2818,11 +2841,7 @@ class WeatherWidget(tk.Tk):
             self.refresh_weather(city, place)
 
     def _schedule_refresh(self) -> None:
-        if self.refresh_job is not None:
-            try:
-                self.after_cancel(self.refresh_job)
-            except tk.TclError:
-                pass
+        self._cancel_job("refresh_job")
         self.refresh_job = self.after(REFRESH_INTERVAL_MS, self._run_scheduled_refresh)
 
     def _run_scheduled_refresh(self) -> None:

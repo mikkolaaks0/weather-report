@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+/.venv/
 weather_settings.json
 build/
 dist/

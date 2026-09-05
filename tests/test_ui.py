@@ -5,6 +5,56 @@ from unittest.mock import Mock, patch
 import main
 
 
+@unittest.skipUnless(os.name == "nt" and main.ImageTk is not None, "Windows Tk/Pillow timers")
+class TimerLifecycleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        settings = {"city": "Espoo", "temperature_unit": "celsius", "popup_theme": main.DEFAULT_POPUP_THEME}
+        for patcher in (
+            patch.object(main, "load_settings", return_value=settings),
+            patch.object(main, "save_settings", return_value=True),
+            patch.object(main, "is_startup_enabled", return_value=False),
+            patch.object(main.WeatherWidget, "_init_tray_icon"),
+            patch.object(main.WeatherWidget, "_start_background_worker"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.widget = main.WeatherWidget()
+        self.addCleanup(self.widget.destroy)
+
+    def test_manual_update_check_replaces_the_startup_check(self) -> None:
+        widget = self.widget
+        startup_check = widget.update_job
+        self.assertIsNotNone(startup_check)
+        widget.check_for_app_update(manual=True)
+        with patch.object(main.messagebox, "askyesno", return_value=False) as prompt:
+            widget._handle_update_check_result({"state": "available"}, True)
+        prompt.assert_called_once()
+        self.assertFalse(widget.update_check_in_progress)
+        self.assertNotIn(startup_check, widget.tk.call("after", "info"))
+        self.assertIsNone(widget.update_job)
+
+    def test_early_refresh_replaces_bootstrap_and_the_previous_refresh_timer(self) -> None:
+        widget = self.widget
+        bootstrap = widget.bootstrap_job
+        widget.refresh_weather("Espoo")
+        self.assertNotIn(bootstrap, widget.tk.call("after", "info"))
+        self.assertIsNone(widget.bootstrap_job)
+        weather = {"current": {"weather_code": 3, "temperature_2m": 18}, "daily": {"time": ["2026-09-06"]}}
+        widget._apply_weather({"name": "Espoo", "latitude": 60.20, "longitude": 24.65}, weather, "Espoo")
+        refresh_timer = widget.refresh_job
+        widget.refresh_weather()
+        self.assertNotIn(refresh_timer, widget.tk.call("after", "info"))
+        self.assertTrue(widget.fetch_in_progress)
+        self.assertIsNone(widget.refresh_job)
+
+    def test_destroy_cancels_all_scheduled_callbacks(self) -> None:
+        widget = self.widget
+        pending = set(widget.tk.call("after", "info"))
+        self.assertTrue(pending)
+        widget.destroy()
+        self.assertFalse(pending.intersection(widget.tk.call("after", "info")))
+
+
 @unittest.skipUnless(os.name == "nt" and main.ImageTk is not None, "Windows Tk/Pillow smoke test")
 class PopupSmokeTests(unittest.TestCase):
     def test_escape_after_enter_cancels_pending_selection_from_the_card(self) -> None:

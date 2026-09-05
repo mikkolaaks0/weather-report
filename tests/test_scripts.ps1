@@ -231,6 +231,34 @@ try {
             Assert-True $rejected "Publishing accepted changed build input: $change"
         }
     }
+    & {
+        . (Get-ScriptFunctions 'publish_release.ps1')
+        $repository = Join-Path $testDir ('publish-' + [char]0x00e4 + [char]0x6771 + [char]0x4eac)
+        $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('init', '-b', 'main', $repository)
+        Push-Location -LiteralPath $repository
+        try {
+            $previousEncoding = [Console]::OutputEncoding
+            Assert-ReleaseRepository -Directory $repository
+            Assert-True ([Console]::OutputEncoding.CodePage -eq $previousEncoding.CodePage) 'Native command parsing changed console encoding'
+            $rejected = $false
+            try { Assert-ReleaseRepository -Directory $testDir } catch { $rejected = $true }
+            Assert-True $rejected 'Publishing accepted the wrong repository root'
+            $previousIndex = $env:GIT_INDEX_FILE
+            try {
+                $env:GIT_INDEX_FILE = Join-Path $testDir 'foreign-index'
+                $rejected = $false
+                try { Assert-ReleaseRepository -Directory $repository } catch { $rejected = $true }
+                Assert-True $rejected 'Publishing accepted an inherited foreign index'
+            }
+            finally { $env:GIT_INDEX_FILE = $previousIndex }
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('config', 'status.showUntrackedFiles', 'no')
+            [System.IO.File]::WriteAllText((Join-Path $repository 'notes.txt'), 'uncommitted notes')
+            $rejected = $false
+            try { Assert-CleanWorkingTree } catch { $rejected = $true }
+            Assert-True $rejected 'Publishing ignored untracked files hidden by Git configuration'
+        }
+        finally { Pop-Location }
+    }
     Write-Output 'Installer and release safety checks passed.'
 }
 finally {

@@ -27,8 +27,15 @@ function Get-RequiredCommandOutput {
         [string[]]$Arguments
     )
 
-    $output = & $Command @Arguments
-    $exitCode = $LASTEXITCODE
+    $previousEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding
+        $output = & $Command @Arguments
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        [Console]::OutputEncoding = $previousEncoding
+    }
     if ($exitCode -ne 0) {
         throw "Command failed: $Command $($Arguments -join ' ')"
     }
@@ -59,7 +66,7 @@ function Get-NextPatchVersion {
 }
 
 function Assert-CleanWorkingTree {
-    $changes = Get-RequiredCommandOutput -Command 'git' -Arguments @('status', '--porcelain')
+    $changes = Get-RequiredCommandOutput -Command 'git' -Arguments @('status', '--porcelain', '--untracked-files=normal')
     if ($changes) {
         throw "Working tree is not clean. Commit or stash changes before publishing a release."
     }
@@ -95,6 +102,21 @@ function Sync-CurrentBranch {
     return $branch
 }
 
+function Assert-ReleaseRepository {
+    param([string]$Directory)
+
+    $localVariables = @(Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', '--local-env-vars')) + @('GIT_NAMESPACE')
+    foreach ($name in $localVariables) {
+        if ([Environment]::GetEnvironmentVariable($name)) {
+            throw "Clear inherited Git repository override $name before publishing."
+        }
+    }
+    $repository = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', '--show-toplevel')
+    if ([System.IO.Path]::GetFullPath($repository).TrimEnd('\') -ne [System.IO.Path]::GetFullPath($Directory).TrimEnd('\')) {
+        throw 'Git is targeting another working tree. Clear inherited Git repository overrides before publishing.'
+    }
+}
+
 function Assert-ReleaseSourceUnchanged {
     param([string]$Commit, [string]$Branch)
 
@@ -117,6 +139,7 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     throw 'GitHub CLI was not found. Install it with: winget install --id GitHub.cli'
 }
 
+Assert-ReleaseRepository -Directory $root
 Invoke-RequiredCommand -Command 'gh' -Arguments @('auth', 'status')
 Assert-CleanWorkingTree
 $branch = Sync-CurrentBranch -ExpectedBranch $releaseBranch
