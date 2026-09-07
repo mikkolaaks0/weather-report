@@ -39,13 +39,6 @@ except Exception:  # noqa: BLE001
 
 APP_NAME = "Weather Report"
 APP_SLUG = "weather-report"
-APP_VERSION = "0.1.2"
-APP_VERSION_DATE = "07.09.2026"
-APP_VERSION_LABEL = APP_VERSION_DATE
-FOOTER_TEXT = (
-    f"Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot "
-    f"• Versio: {APP_VERSION_LABEL}"
-)
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_TERMS_URL = "https://open-meteo.com/en/terms"
@@ -74,6 +67,14 @@ RUNTIME_DIR = Path(getattr(sys, "_MEIPASS", PROJECT_DIR))
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 APP_EXECUTABLE_PATH = Path(sys.executable).resolve()
 APP_WORKING_DIR = APP_EXECUTABLE_PATH.parent if IS_FROZEN else PROJECT_DIR
+APP_METADATA = json.loads((RUNTIME_DIR / "app_metadata.json").read_text(encoding="utf-8"))
+APP_VERSION = APP_METADATA["version"]
+APP_VERSION_DATE = APP_METADATA["date"]
+APP_VERSION_LABEL = APP_VERSION_DATE
+FOOTER_TEXT = (
+    f"Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot "
+    f"• Versio: {APP_VERSION_LABEL}"
+)
 
 
 def _runtime_file_signature() -> tuple[tuple[str, int, int], ...] | None:
@@ -83,6 +84,7 @@ def _runtime_file_signature() -> tuple[tuple[str, int, int], ...] | None:
     roots = [
         PROJECT_DIR / "main.py",
         PROJECT_DIR / "city_search.py",
+        PROJECT_DIR / "app_metadata.json",
         PROJECT_DIR / "start_weather_app.bat",
         PROJECT_DIR / "start_weather_app.vbs",
         PROJECT_DIR / "assets",
@@ -1013,7 +1015,9 @@ def max_precipitation_probability_next_hours(
         if hour_time is None or probability_value is None or not 0 <= probability_value <= 100:
             continue
         try:
-            in_window = current_time <= hour_time < window_end
+            # Open-Meteo timestamps mark the END of the precipitation hour.
+            # Include every hourly interval overlapping the requested window.
+            in_window = current_time < hour_time and hour_time - timedelta(hours=1) < window_end
         except TypeError:
             in_window = False
         if in_window:
@@ -2573,8 +2577,8 @@ class WeatherWidget(tk.Tk):
     def _position_widget(self) -> None:
         self._cancel_job("position_job")
         self.update_idletasks()
-        width = 322
-        height = 84
+        width = max(322, self.winfo_reqwidth())
+        height = max(84, self.winfo_reqheight())
         x_pos = max(0, self.winfo_screenwidth() - width - 20)
         y_pos = max(0, self.winfo_screenheight() - height - 70)
         self.geometry(f"{width}x{height}+{x_pos}+{y_pos}")
@@ -2758,6 +2762,8 @@ class WeatherWidget(tk.Tk):
         )
 
     def _fetch_worker(self, city: str, temperature_unit: str, place_hint: dict | None) -> None:
+        place = place_hint
+        city_not_found = False
         try:
             place = place_hint or _request_with_retry(lambda: geocode_city(city))
             latitude, longitude = _coordinates_from_place(place)
@@ -2780,17 +2786,21 @@ class WeatherWidget(tk.Tk):
             )
         except CityNotFoundError as error:
             message = str(error)
-            self._call_on_ui_thread(
-                lambda message=message: self._show_error(message, notify_user=True, retry_previous_location=True)
-            )
+            city_not_found = True
         except (URLError, TimeoutError, ConnectionError, IncompleteRead):
-            self._call_on_ui_thread(lambda: self._show_error("Verkkovirhe. Tarkista internet-yhteys."))
+            message = "Verkkovirhe. Tarkista internet-yhteys."
         except WeatherServiceError as error:
             message = str(error)
-            self._call_on_ui_thread(lambda message=message: self._show_error(message))
         except Exception as error:  # noqa: BLE001
             message = f"Säätietojen haku epäonnistui: {error}"
-            self._call_on_ui_thread(lambda message=message: self._show_error(message))
+        else:
+            return
+        self._call_on_ui_thread(
+            lambda: self._show_error(
+                message, notify_user=city_not_found, retry_previous_location=city_not_found,
+                retry_place=place,
+            )
+        )
 
     def _handle_weather_result(self, place: dict, weather: dict, requested_city: str) -> None:
         if self.pending_city_search:
@@ -2804,13 +2814,20 @@ class WeatherWidget(tk.Tk):
         except Exception:  # noqa: BLE001
             self._show_error("Säädatan käsittely epäonnistui.")
 
-    def _show_error(self, text: str, notify_user: bool = False, retry_previous_location: bool = False) -> None:
+    def _show_error(
+        self, text: str, notify_user: bool = False, retry_previous_location: bool = False,
+        retry_place: dict | None = None,
+    ) -> None:
         self.fetch_in_progress = False
         if self.pending_city_search:
             self._run_pending_city_search()
             return
         if retry_previous_location:
             self.refresh_target = (self.city_var.get(), self.latest_place)
+        else:
+            resolved_place = _saved_place(retry_place)
+            if resolved_place is not None:
+                self.refresh_target = (self.refresh_target[0], resolved_place)
         self.status_var.set(f"Päivitys epäonnistui: {text} Yritetään uudelleen 30 minuutin päästä.")
         self.popup_bg_canvas.itemconfigure(self.hero_updated_label, text="Päivitys epäonnistui")
         # Keep the last successful weather symbol in tray after transient fetch errors.

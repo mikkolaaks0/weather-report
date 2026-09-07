@@ -17,6 +17,8 @@ from the system tray.
 - Background refreshes preserve the city being edited and the highlighted suggestion
 - Temperature, daily high/low, precipitation, humidity, wind, sunrise and sunset
 - Near-term precipitation probability based on the next 6 hours
+- Hourly rain probabilities follow Open-Meteo's preceding-hour timestamps,
+  including partially overlapping hours at the edges of that window
 - Automatic weather refresh every 30 minutes
 - Failed refreshes are marked on the popup while keeping the last valid forecast
 - Network failures during a city change retry the selected location, not the old city
@@ -100,6 +102,8 @@ still cancels a pending suggestion selection. If a confirmed location's weather
 request fails temporarily, refresh retries that location while keeping the last
 good forecast visible. A name that cannot be found leaves refresh targeting the
 previous location until another search is submitted.
+Coordinates resolved by a regular name search are also retained for retries if
+the following weather request fails; successful geocoding is not repeated.
 Suggestions use the existing Open-Meteo geocoding service, with no location
 permission or additional dependencies. See its [matching rules](https://open-meteo.com/en/docs/geocoding-api).
 
@@ -145,6 +149,13 @@ artifacts produced by the current build, so unrelated files in `release/` cannot
 leak into the published checksum manifest. The build stops before packaging if
 the test suite fails.
 
+`app_metadata.json` is the single source for the app version and release date.
+Without `-Version`, the build uses its version; an explicit version must match.
+The same version is embedded in the executable's Windows FileVersion and
+ProductVersion fields and passed to Inno Setup. Build the installer through
+`build_release.ps1`, which supplies the required Inno Setup version definition.
+The popup footer continues to display only the release date.
+
 ## Test
 
 The test suite uses Python's standard library and does not need extra test
@@ -166,6 +177,8 @@ Coverage includes:
   rollback, early-exit detection, and source-launcher interpreter selection.
 - Git fast-forward/conflict handling, restart detection, inherited repository
   overrides, Unicode paths, hidden untracked files, and release-source validation.
+- Release metadata mismatches, hourly probability boundaries across midnight,
+  and the fallback window's requested size when the tray is unavailable.
 
 Windows tests render a hidden popup and inspect temporary `.lnk` files. Git tests
 use local repositories without contacting GitHub. Installer and launcher tests
@@ -194,7 +207,8 @@ winget install --id GitHub.cli
 gh auth login
 ```
 
-Publish the next patch release automatically, for example `v0.1.1` -> `v0.1.2`:
+Update the version and date in `app_metadata.json`, commit the changes, and
+publish that version (the script derives the tag from the metadata):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -SkipInstaller
@@ -212,8 +226,8 @@ publishes `release/WeatherReport-portable.zip`, `release/SHA256SUMS.txt`, and th
 Inno Setup installer when one was built. The release version is also passed into
 the Windows installer metadata.
 Publishing checks that the branch, commit, and working tree did not change during
-the build, and tags the exact commit that was built. Automatic patch numbering
-uses stable version tags, ignoring prerelease tags.
+the build, and tags the exact commit that was built. An explicit `-Version` must
+match the application metadata, and existing version tags are never overwritten.
 The release script verifies the repository root and refuses inherited
 repository-local Git overrides before publishing. Untracked files block release
 publishing even when Git is configured to hide them from status output.

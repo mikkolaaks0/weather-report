@@ -1,6 +1,6 @@
 #define AppName "Weather Report"
 #ifndef AppVersion
-#define AppVersion "0.1.2"
+#error AppVersion must be supplied by build_release.ps1 from app_metadata.json
 #endif
 #define AppPublisher "Weather Report"
 #define AppExeName "WeatherReport.exe"

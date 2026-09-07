@@ -3,6 +3,7 @@ import io
 import json
 import queue
 import re
+import sys
 import subprocess
 import tempfile
 import threading
@@ -149,9 +150,22 @@ class DataFormattingTests(unittest.TestCase):
                 "precipitation_probability": [99, "28", 101, 72.6, 100],
             },
         }
-        self.assertEqual(main.max_precipitation_probability_next_hours(weather), 73)
+        self.assertEqual(main.max_precipitation_probability_next_hours(weather), 100)
         self.assertIsNone(main.max_precipitation_probability_next_hours(weather, hours=0))
         self.assertIsNone(main.max_precipitation_probability_next_hours({"current": None}))
+
+    def test_rain_probability_uses_overlapping_hours_not_past_hour(self) -> None:
+        weather = {
+            "current": {"time": "2026-09-07T23:00+03:00"},
+            "hourly": {
+                "time": ["2026-09-07T23:00+03:00", "2026-09-08T00:00+03:00",
+                         "2026-09-08T05:00+03:00", "2026-09-08T06:00+03:00"],
+                "precipitation_probability": [99, 10, 75, 100],
+            },
+        }
+        self.assertEqual(main.max_precipitation_probability_next_hours(weather), 75)
+        weather["current"]["time"] = "2026-09-07T23:15+03:00"
+        self.assertEqual(main.max_precipitation_probability_next_hours(weather), 100)
 
     def test_city_formatting_omits_empty_placeholders(self) -> None:
         self.assertEqual(main.format_city({"name": "Espoo", "admin1": "Uusimaa"}), "Espoo, Uusimaa")
@@ -968,6 +982,11 @@ class UpdateSafetyTests(unittest.TestCase):
                 self.assertNotEqual(main._runtime_file_signature(), added)
                 icon.unlink()
                 self.assertEqual(main._runtime_file_signature(), original)
+                metadata = root / "app_metadata.json"
+                metadata.write_text('{"version":"0.1.2","date":"07.09.2026"}', encoding="utf-8")
+                with_metadata = main._runtime_file_signature()
+                metadata.write_text('{"version":"0.1.3","date":"08.09.2026"}', encoding="utf-8")
+                self.assertNotEqual(main._runtime_file_signature(), with_metadata)
 
     def test_update_status_handles_non_repository_and_git_comparison_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir, patch.object(
@@ -1180,6 +1199,42 @@ class WeatherResultTests(unittest.TestCase):
             widget.refresh_weather("a" * (main.MAX_CITY_QUERY_LENGTH + 1))
         self.assertEqual(widget.refresh_target, ("Espoo", None))
 
+    def test_geocoded_location_survives_a_failed_first_weather_request(self) -> None:
+        widget = self.make_result_widget("Rich")
+        old_place = {"name": "Espoo", "latitude": 60.2, "longitude": 24.65}
+        new_place = {"name": "Richmond", "latitude": 49.17, "longitude": -123.14}
+        weather = {"current": {"weather_code": 3, "temperature_2m": 18}, "daily": {"time": ["2026-09-07"]}}
+        widget._persist_settings = Mock()
+        widget._apply_weather(old_place, weather, "Espoo")
+        widget._start_background_worker = Mock()
+        callbacks = []
+        widget._call_on_ui_thread = callbacks.append
+        with (
+            patch.object(main, "geocode_city", return_value=new_place) as geocode,
+            patch.object(main, "get_weather", side_effect=URLError("offline")),
+            patch.object(main.time, "sleep"),
+        ):
+            widget.refresh_weather("Rich")
+            widget._start_background_worker.call_args.args[0]()
+        self.assertEqual(widget.refresh_target, ("Rich", None))
+        for callback in callbacks:
+            callback()
+        self.assertEqual(widget.refresh_target, ("Rich", new_place))
+        self.assertEqual(widget.settings["place"], old_place)
+        self.assertIs(widget.latest_weather, weather)
+        callbacks.clear()
+        with (
+            patch.object(main, "geocode_city") as geocode,
+            patch.object(main, "get_weather", return_value=weather),
+        ):
+            widget.refresh_weather()
+            widget._start_background_worker.call_args.args[0]()
+            geocode.assert_not_called()
+        for callback in callbacks:
+            callback()
+        self.assertEqual(widget.settings["place"], new_place)
+        widget.city_search.set_text.assert_called_once_with("Richmond", new_place)
+
     def test_unknown_city_does_not_replace_the_automatic_refresh_target(self) -> None:
         widget = self.make_result_widget("Not a real city")
         old_place = {"name": "Espoo", "latitude": 60.2, "longitude": 24.65}
@@ -1250,7 +1305,10 @@ class WeatherResultTests(unittest.TestCase):
         widget.pending_city_search = "Espoo"
         widget.refresh_target = ("Espoo", None)
         with patch.object(main.messagebox, "showerror") as show_error:
-            widget._show_error("Old city not found", notify_user=True, retry_previous_location=True)
+            widget._show_error(
+                "Old city not found", notify_user=True, retry_previous_location=True,
+                retry_place={"name": "Old city", "latitude": 10, "longitude": 20},
+            )
         self.assertEqual(widget.refresh_target, ("Espoo", None))
         show_error.assert_not_called()
         widget._update_tray_symbol.assert_not_called()
@@ -1484,16 +1542,13 @@ class ThreadDispatchTests(unittest.TestCase):
 
 
 class PackagingManifestTests(unittest.TestCase):
-    def test_build_and_installer_default_versions_match(self) -> None:
-        build_script = (main.PROJECT_DIR / "build_release.ps1").read_text(encoding="utf-8")
+    def test_runtime_and_installer_use_the_release_metadata(self) -> None:
+        metadata = json.loads((main.PROJECT_DIR / "app_metadata.json").read_text(encoding="utf-8"))
         installer_script = (main.PROJECT_DIR / "installer.iss").read_text(encoding="utf-8")
-        build_match = re.search(r"\[string\]\$Version = '([^']+)'", build_script)
-        installer_match = re.search(r'#define AppVersion "([^"]+)"', installer_script)
-
-        self.assertIsNotNone(build_match)
-        self.assertIsNotNone(installer_match)
-        self.assertEqual(main.APP_VERSION, build_match.group(1))
-        self.assertEqual(build_match.group(1), installer_match.group(1))
+        self.assertEqual(main.APP_VERSION, metadata["version"])
+        self.assertEqual(main.APP_VERSION_DATE, metadata["date"])
+        self.assertIn("#error AppVersion must be supplied", installer_script)
+        self.assertIsNone(re.search(r'#define AppVersion "([^"]+)"', installer_script))
 
     def test_footer_contains_data_terms_and_version(self) -> None:
         self.assertIn("Säädata: Open-Meteo", main.FOOTER_TEXT)
@@ -1554,10 +1609,16 @@ class PackagingManifestTests(unittest.TestCase):
             "COLLECT": lambda *_args, **_kwargs: object(),
         }
         spec_path = main.PROJECT_DIR / "WeatherReport.spec"
-        exec(compile(spec_path.read_text(encoding="utf-8"), str(spec_path), "exec"), namespace)
+        versioninfo = Mock()
+        with patch.dict(sys.modules, {"PyInstaller.utils.win32.versioninfo": versioninfo}):
+            exec(compile(spec_path.read_text(encoding="utf-8"), str(spec_path), "exec"), namespace)
+        version = tuple(int(part) for part in main.APP_VERSION.split(".")) + (0,)
+        self.assertEqual(versioninfo.FixedFileInfo.call_args.kwargs["filevers"], version)
+        self.assertEqual(versioninfo.FixedFileInfo.call_args.kwargs["prodvers"], version)
 
         packaged_sources = {Path(source).resolve() for source, _destination in namespace["datas"]}
         required_sources = {
+            (main.PROJECT_DIR / "app_metadata.json").resolve(),
             *(path.resolve() for path in main.WEATHER_ICONS_DIR.iterdir() if path.is_file()),
             *(path.resolve() for path in main.METRIC_ICONS_DIR.iterdir() if path.is_file()),
             *(path.resolve() for path in main.FONTS_DIR.iterdir() if path.is_file()),

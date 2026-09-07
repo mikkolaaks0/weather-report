@@ -54,6 +54,14 @@ class TimerLifecycleTests(unittest.TestCase):
         widget.destroy()
         self.assertFalse(pending.intersection(widget.tk.call("after", "info")))
 
+    def test_fallback_widget_fits_its_weather_and_controls(self) -> None:
+        widget = self.widget
+        with patch.object(widget, "geometry", wraps=widget.geometry) as geometry:
+            widget._position_widget()
+        width, height = map(int, geometry.call_args.args[0].split("+", 1)[0].split("x"))
+        self.assertGreaterEqual(width, widget.winfo_reqwidth())
+        self.assertGreaterEqual(height, widget.winfo_reqheight())
+
 
 @unittest.skipUnless(os.name == "nt" and main.ImageTk is not None, "Windows Tk/Pillow smoke test")
 class PopupSmokeTests(unittest.TestCase):

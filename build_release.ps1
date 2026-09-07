@@ -1,9 +1,23 @@
 param(
     [switch]$SkipInstaller,
-    [string]$Version = '0.1.2'
+    [string]$Version
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Resolve-BuildVersion {
+    param([string]$MetadataPath, [string]$RequestedVersion)
+
+    $metadata = Get-Content -LiteralPath $MetadataPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($metadata.version -notmatch '^\d+\.\d+\.\d+$') {
+        throw 'app_metadata.json must contain a semantic version like 0.1.2.'
+    }
+    $null = [datetime]::ParseExact($metadata.date, 'dd.MM.yyyy', [Globalization.CultureInfo]::InvariantCulture)
+    if ($RequestedVersion -and $RequestedVersion -cnotmatch ('^v?' + [regex]::Escape($metadata.version) + '$')) {
+        throw "Requested version $RequestedVersion does not match app_metadata.json ($($metadata.version)). Update the metadata before building."
+    }
+    return $metadata.version
+}
 
 function Resolve-PythonCommand {
     $candidates = @(
@@ -59,10 +73,7 @@ function Ensure-Tool {
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
-$normalizedVersion = $Version.TrimStart('v')
-if ($normalizedVersion -notmatch '^\d+\.\d+\.\d+$') {
-    throw "Version must use semantic format like 0.1.1 or v0.1.1. Got: $Version"
-}
+$normalizedVersion = Resolve-BuildVersion -MetadataPath (Join-Path $root 'app_metadata.json') -RequestedVersion $Version
 
 $python = Resolve-PythonCommand
 Invoke-Python -Python $python -Arguments @('-m', 'pip', 'install', '-r', 'requirements.txt')
@@ -78,6 +89,7 @@ $distDir = Join-Path $root 'dist\WeatherReport'
 $distExe = Join-Path $distDir 'WeatherReport.exe'
 $requiredBuildPaths = @(
     $distExe,
+    (Join-Path $distDir '_internal\app_metadata.json'),
     (Join-Path $distDir '_internal\assets\weather-icons\unknown.png'),
     (Join-Path $distDir '_internal\assets\metric-icons\wind.png'),
     (Join-Path $distDir '_internal\assets\fonts\Exo2-Regular.ttf')

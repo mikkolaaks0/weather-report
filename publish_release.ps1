@@ -42,29 +42,6 @@ function Get-RequiredCommandOutput {
     return $output
 }
 
-function Get-NextPatchVersion {
-    Invoke-RequiredCommand -Command 'git' -Arguments @('fetch', '--tags', 'origin')
-
-    $latestTag = Get-RequiredCommandOutput -Command 'git' -Arguments @(
-        'tag', '--list', 'v[0-9]*.[0-9]*.[0-9]*', '--sort=-v:refname'
-    ) |
-        Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
-        Select-Object -First 1
-
-    if (-not $latestTag) {
-        return 'v0.1.0'
-    }
-
-    if ($latestTag -notmatch '^v(\d+)\.(\d+)\.(\d+)$') {
-        throw "Latest version tag is not semantic: $latestTag"
-    }
-
-    $major = [int]$Matches[1]
-    $minor = [int]$Matches[2]
-    $patch = [int]$Matches[3] + 1
-    return "v$major.$minor.$patch"
-}
-
 function Assert-CleanWorkingTree {
     $changes = Get-RequiredCommandOutput -Command 'git' -Arguments @('status', '--porcelain', '--untracked-files=normal')
     if ($changes) {
@@ -130,6 +107,14 @@ function Assert-ReleaseSourceUnchanged {
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
+$metadata = Get-Content -LiteralPath (Join-Path $root 'app_metadata.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($metadata.version -notmatch '^\d+\.\d+\.\d+$') {
+    throw 'app_metadata.json must contain a semantic version like 0.1.2.'
+}
+if ($Version -and $Version -cnotmatch ('^v?' + [regex]::Escape($metadata.version) + '$')) {
+    throw "Requested version $Version does not match app_metadata.json ($($metadata.version)). Update the metadata before publishing."
+}
+$Version = "v$($metadata.version)"
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     throw 'Git was not found in PATH.'
@@ -144,17 +129,6 @@ Invoke-RequiredCommand -Command 'gh' -Arguments @('auth', 'status')
 Assert-CleanWorkingTree
 $branch = Sync-CurrentBranch -ExpectedBranch $releaseBranch
 $releaseCommit = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')
-
-if (-not $Version) {
-    $Version = Get-NextPatchVersion
-}
-elseif ($Version -notmatch '^v') {
-    $Version = "v$Version"
-}
-
-if ($Version -notmatch '^v\d+\.\d+\.\d+$') {
-    throw "Version must use semantic format like v0.1.1. Got: $Version"
-}
 
 if (git rev-parse -q --verify "refs/tags/$Version") {
     throw "Tag already exists: $Version"

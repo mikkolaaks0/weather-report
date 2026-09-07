@@ -1,7 +1,30 @@
+import json
 from pathlib import Path
+from PyInstaller.utils.win32.versioninfo import (
+    FixedFileInfo, StringFileInfo, StringStruct, StringTable,
+    VarFileInfo, VarStruct, VSVersionInfo,
+)
 
 
 project_dir = Path(SPECPATH).resolve()
+metadata = json.loads((project_dir / "app_metadata.json").read_text(encoding="utf-8"))
+version_number = tuple(int(part) for part in metadata["version"].split(".")) + (0,)
+version_info = VSVersionInfo(
+    ffi=FixedFileInfo(
+        filevers=version_number, prodvers=version_number,
+        mask=0x3F, flags=0, OS=0x40004, fileType=1, subtype=0, date=(0, 0),
+    ),
+    kids=[
+        StringFileInfo([StringTable("040904B0", [
+            StringStruct("FileDescription", "Weather Report"),
+            StringStruct("FileVersion", metadata["version"]),
+            StringStruct("ProductName", "Weather Report"),
+            StringStruct("ProductVersion", metadata["version"]),
+            StringStruct("OriginalFilename", "WeatherReport.exe"),
+        ])]),
+        VarFileInfo([VarStruct("Translation", [1033, 1200])]),
+    ],
+)
 
 datas = []
 
@@ -16,6 +39,7 @@ def add_data_dir(source_dir, destination):
 
 
 data_files = [
+    ("app_metadata.json", "."),
     ("README.md", "."),
     ("LICENSE", "."),
     ("THIRD_PARTY_NOTICES.md", "."),
@@ -60,6 +84,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="WeatherReport",
+    version=version_info,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

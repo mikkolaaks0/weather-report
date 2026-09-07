@@ -204,13 +204,27 @@ try {
     }
 
     & {
-        . (Get-ScriptFunctions 'publish_release.ps1')
-        function Invoke-RequiredCommand { param($Command, $Arguments) }
-        function Get-RequiredCommandOutput {
-            param($Command, $Arguments)
-            return @('v2.0.0-rc1', 'v1.2.10', 'v1.2.9')
+        . (Get-ScriptFunctions 'build_release.ps1')
+        $metadataPath = Join-Path $testDir 'app_metadata.json'
+        [System.IO.File]::WriteAllText($metadataPath, '{"version":"1.2.3","date":"07.09.2026"}')
+        foreach ($requested in @('', '1.2.3', 'v1.2.3')) {
+            Assert-True ((Resolve-BuildVersion $metadataPath $requested) -eq '1.2.3') 'Build did not use application metadata'
         }
-        Assert-True ((Get-NextPatchVersion) -eq 'v1.2.11') 'Prerelease tag broke patch version selection'
+        foreach ($requested in @('v9.9.9', 'vv1.2.3', 'v1.2.3-rc1')) {
+            $rejected = $false
+            try { Resolve-BuildVersion $metadataPath $requested } catch { $rejected = $true }
+            Assert-True $rejected 'Build accepted a version that differs from the application'
+        }
+        foreach ($invalid in @('{"version":"bad","date":"07.09.2026"}', '{"version":"1.2.3","date":"31.02.2026"}')) {
+            [System.IO.File]::WriteAllText($metadataPath, $invalid)
+            $rejected = $false
+            try { Resolve-BuildVersion $metadataPath } catch { $rejected = $true }
+            Assert-True $rejected 'Build accepted invalid release metadata'
+        }
+    }
+
+    & {
+        . (Get-ScriptFunctions 'publish_release.ps1')
         $state = @{ Dirty = $false; Commit = 'built-commit'; Branch = 'main' }
         function Get-RequiredCommandOutput {
             param($Command, $Arguments)
