@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      PY_PYTHON3: "3.13"
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release tag
+        id: tag
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $metadata = Get-Content app_metadata.json -Raw | ConvertFrom-Json
+          if ($env:GITHUB_REF_NAME -cne "v$($metadata.version)") {
+            throw 'Release tag does not match app_metadata.json.'
+          }
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) { throw 'Release commit must belong to main.' }
+          $annotation = git for-each-ref '--format=%(contents)' $env:GITHUB_REF
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the release tag.' }
+          $publish = if (($annotation -join "`n") -match '\[local-release\]') { 'false' } else { 'true' }
+          "publish=$publish" | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Set up Python
+        if: steps.tag.outputs.publish == 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Test and build Windows package
+        if: steps.tag.outputs.publish == 'true'
+        run: ./build_release.ps1 -Version $env:GITHUB_REF_NAME -SkipInstaller
+
+      - name: Publish complete release
+        if: steps.tag.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release create $env:GITHUB_REF_NAME --verify-tag --draft `
+            --title "Weather Report $env:GITHUB_REF_NAME" --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the draft release.' }
+          gh release upload $env:GITHUB_REF_NAME release/WeatherReport-portable.zip release/SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Upload failed; release remains a draft.' }
+          gh release edit $env:GITHUB_REF_NAME --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish the completed release.' }

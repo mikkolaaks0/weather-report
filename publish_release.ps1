@@ -158,7 +158,7 @@ if (-not (Test-Path $checksums)) {
 }
 
 Assert-ReleaseSourceUnchanged -Commit $releaseCommit -Branch $branch
-Invoke-RequiredCommand -Command 'git' -Arguments @('tag', '-a', $Version, $releaseCommit, '-m', "Weather Report $Version")
+Invoke-RequiredCommand -Command 'git' -Arguments @('tag', '-a', $Version, $releaseCommit, '-m', "Weather Report $Version [local-release]")
 Invoke-RequiredCommand -Command 'git' -Arguments @('push', 'origin', $Version)
 
 $notes = @"

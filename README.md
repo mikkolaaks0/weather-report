@@ -200,7 +200,23 @@ private runtime font on Windows. Users do not need to install the font manually.
 
 ## Publish A Release
 
-Install GitHub CLI once and sign in:
+The GitHub Actions `Release` workflow builds and publishes a portable release
+when a version tag is pushed. No local GitHub CLI login is needed. Set the
+version and date in `app_metadata.json`, commit and push `main`, then tag that
+commit. For example, when publishing version `0.1.2`:
+
+```powershell
+git tag -a v0.1.2 -m "Weather Report v0.1.2"
+git push origin v0.1.2
+```
+
+The workflow verifies that the tag matches the app metadata and belongs to
+`main`, runs the tests, and builds the package on Windows. It uploads the ZIP
+and `SHA256SUMS.txt` to a draft release before publishing it as the latest
+release. A failed build or upload does not replace the latest published version.
+
+For local publishing, including optional Inno Setup installers, install GitHub
+CLI once and sign in:
 
 ```powershell
 winget install --id GitHub.cli
@@ -231,6 +247,8 @@ match the application metadata, and existing version tags are never overwritten.
 The release script verifies the repository root and refuses inherited
 repository-local Git overrides before publishing. Untracked files block release
 publishing even when Git is configured to hide them from status output.
+Locally published tags carry a `[local-release]` annotation so the Actions
+workflow does not publish the same version in parallel or override `-Draft`.
 
 The one-line installer uses the latest GitHub Release and verifies the portable
 zip when `SHA256SUMS.txt` is present.
