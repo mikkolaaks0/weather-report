@@ -131,13 +131,13 @@ keeps the previous working link intact.
 Create a portable release package:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build_release.ps1 -Version 0.1.1 -SkipInstaller
+powershell -ExecutionPolicy Bypass -File .\build_release.ps1 -Version 0.1.2 -SkipInstaller
 ```
 
 Create a portable package and an installer, when Inno Setup is installed:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build_release.ps1 -Version 0.1.1
+powershell -ExecutionPolicy Bypass -File .\build_release.ps1 -Version 0.1.2
 ```
 
 Release artifacts are written to `release/`. `SHA256SUMS.txt` contains only the
@@ -194,7 +194,7 @@ winget install --id GitHub.cli
 gh auth login
 ```
 
-Publish the next patch release automatically, for example `v0.1.0` -> `v0.1.1`:
+Publish the next patch release automatically, for example `v0.1.1` -> `v0.1.2`:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -SkipInstaller
@@ -203,7 +203,7 @@ powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -SkipInstaller
 Publish a specific version:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -Version v0.1.1 -SkipInstaller
+powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -Version v0.1.2 -SkipInstaller
 ```
 
 The publish script requires a clean `main` branch, builds the portable package,

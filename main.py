@@ -39,8 +39,8 @@ except Exception:  # noqa: BLE001
 
 APP_NAME = "Weather Report"
 APP_SLUG = "weather-report"
-APP_VERSION = "0.1.1"
-APP_VERSION_DATE = "06.09.2026"
+APP_VERSION = "0.1.2"
+APP_VERSION_DATE = "07.09.2026"
 APP_VERSION_LABEL = APP_VERSION_DATE
 FOOTER_TEXT = (
     f"Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot "
