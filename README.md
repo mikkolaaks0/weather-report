@@ -268,7 +268,10 @@ The updater clears inherited repository-local Git context and reads Git output
 as UTF-8, keeping commands scoped to this checkout and supporting international
 filenames on Windows. Untracked files remain a reason to skip automatic updates
 even when Git's status configuration normally hides them.
-That local restart check works without an internet connection. Only one update
+That local restart check works without an internet connection and compares file
+content hashes, so timestamp-only changes do not request a
+restart and same-size edits with identical timestamps are still detected.
+Only one update
 can run at a time, including confirmation and restart. In-app restarts reuse the
 working Python environment instead of searching for another Python installation.
 The current process stays open if the replacement cannot be launched or exits

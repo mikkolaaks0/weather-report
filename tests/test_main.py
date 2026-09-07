@@ -1,6 +1,7 @@
 import ctypes
 import io
 import json
+import os
 import queue
 import re
 import sys
@@ -985,8 +986,14 @@ class UpdateSafetyTests(unittest.TestCase):
                 metadata = root / "app_metadata.json"
                 metadata.write_text('{"version":"0.1.2","date":"07.09.2026"}', encoding="utf-8")
                 with_metadata = main._runtime_file_signature()
+                saved_stat = metadata.stat()
                 metadata.write_text('{"version":"0.1.3","date":"08.09.2026"}', encoding="utf-8")
+                # Simulate same-size updates on a filesystem with coarse timestamps.
+                os.utime(metadata, ns=(saved_stat.st_atime_ns, saved_stat.st_mtime_ns))
                 self.assertNotEqual(main._runtime_file_signature(), with_metadata)
+                changed = main._runtime_file_signature()
+                os.utime(metadata, ns=(saved_stat.st_atime_ns, saved_stat.st_mtime_ns + 2_000_000_000))
+                self.assertEqual(main._runtime_file_signature(), changed)
 
     def test_update_status_handles_non_repository_and_git_comparison_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir, patch.object(

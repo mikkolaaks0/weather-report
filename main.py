@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import os
@@ -77,7 +78,7 @@ FOOTER_TEXT = (
 )
 
 
-def _runtime_file_signature() -> tuple[tuple[str, int, int], ...] | None:
+def _runtime_file_signature() -> tuple[tuple[str, str], ...] | None:
     if IS_FROZEN:
         return None
 
@@ -96,17 +97,16 @@ def _runtime_file_signature() -> tuple[tuple[str, int, int], ...] | None:
         elif root.is_dir():
             files.extend(path for path in root.rglob("*") if path.is_file())
 
-    signature: list[tuple[str, int, int]] = []
+    signature: list[tuple[str, str]] = []
     for path in files:
         try:
-            file_stat = path.stat()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError:
             continue
         signature.append(
             (
                 str(path.relative_to(PROJECT_DIR)).casefold(),
-                file_stat.st_mtime_ns,
-                file_stat.st_size,
+                digest,
             )
         )
     return tuple(sorted(signature))
