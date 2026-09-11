@@ -588,6 +588,7 @@ class SettingsAndShortcutTests(unittest.TestCase):
                 main._write_windows_shortcut(shortcut_path)
 
         self.assertIn("-NonInteractive", run.call_args.args[0])
+        self.assertIn("-Sta", run.call_args.args[0])
 
     def test_shortcut_creation_rejects_missing_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -655,7 +656,7 @@ class SettingsAndShortcutTests(unittest.TestCase):
                 "@{Target=$link.TargetPath; Arguments=$link.Arguments; WorkingDirectory=$link.WorkingDirectory} | ConvertTo-Json -Compress"
             )
             result = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+                ["powershell", "-NoProfile", "-NonInteractive", "-Sta", "-Command", command],
                 capture_output=True, text=True, check=True, timeout=20, **main._hidden_subprocess_kwargs(),
             )
             actual = json.loads(result.stdout)

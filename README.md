@@ -217,11 +217,11 @@ private runtime font on Windows. Users do not need to install the font manually.
 The GitHub Actions `Release` workflow builds and publishes a portable release
 when a version tag is pushed. No local GitHub CLI login is needed. Set the
 version and date in `app_metadata.json`, commit and push `main`, then tag that
-commit. For example, when publishing version `0.1.3`:
+commit. For example, when publishing version `0.1.4`:
 
 ```powershell
-git tag -a v0.1.3 -m "Weather Report v0.1.3"
-git push origin v0.1.3
+git tag -a v0.1.4 -m "Weather Report v0.1.4"
+git push origin v0.1.4
 ```
 
 The workflow requires the reusable `Tests` workflow to pass on both Python 3.10
@@ -248,7 +248,7 @@ powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -SkipInstaller
 Publish a specific version:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -Version v0.1.3 -SkipInstaller
+powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -Version v0.1.4 -SkipInstaller
 ```
 
 The publish script requires a clean `main` branch, builds the portable package,

@@ -1248,7 +1248,7 @@ def _write_windows_shortcut(shortcut_path: Path) -> None:
     )
     try:
         subprocess.run(
-            [shell_path, "-NoProfile", "-NonInteractive", "-Command", script],
+            [shell_path, "-NoProfile", "-NonInteractive", "-Sta", "-Command", script],
             check=True,
             capture_output=True,
             text=True,
