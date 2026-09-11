@@ -45,6 +45,7 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_TERMS_URL = "https://open-meteo.com/en/terms"
 WINDOWS_TASKBAR_SETTINGS_URI = "ms-settings:taskbar"
 REFRESH_INTERVAL_MS = 30 * 60 * 1000
+WEATHER_RETRY_DELAYS_MS = (60_000, 120_000, 300_000)
 FRESH_WEATHER_MAX_AGE_MINUTES = 15
 UPDATE_CHECK_DELAY_MS = 10 * 1000
 MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -936,13 +937,21 @@ def format_temperature(value: object, unit_symbol: str) -> str:
     return f"{round(number)}°{normalized_unit}"
 
 
-def format_metric(value: object, suffix: str = "", decimals: int = 0) -> str:
+def format_metric(
+    value: object, suffix: str = "", decimals: int = 0, *,
+    minimum: float | None = None, maximum: float | None = None,
+) -> str:
     number = _coerce_number(value)
-    if number is None:
+    if (
+        number is None
+        or (minimum is not None and number < minimum)
+        or (maximum is not None and number > maximum)
+    ):
         return "-"
     decimals = max(0, int(decimals))
     if decimals:
-        return f"{number:.{decimals}f}{suffix}"
+        rounded = round(number, decimals)
+        return f"{rounded if rounded else 0:.{decimals}f}{suffix}"
     return f"{round(number)}{suffix}"
 
 
@@ -983,6 +992,9 @@ def _parse_open_meteo_time(value: object) -> datetime | None:
         return None
 
     normalized = value.strip()
+    # A date without a clock time must not become a fictitious midnight event.
+    if "T" not in normalized and " " not in normalized:
+        return None
     if normalized.endswith("Z"):
         normalized = f"{normalized[:-1]}+00:00"
     try:
@@ -1432,9 +1444,12 @@ class WeatherWidget(tk.Tk):
         self._settings_save_pending = False
         self.popup_theme_id = self._resolve_popup_theme_id(self.settings.get("popup_theme"))
         self.fetch_in_progress = False
+        self.weather_failure_count = 0
+        self.weather_error_notified = False
         self.pending_city_search: str | None = None
         self.pending_city_place: dict | None = None
         self.update_check_in_progress = False
+        self.update_check_manual = False
         self._is_destroying = False
         self._ui_thread_id = threading.get_ident()
         self._ui_callbacks: queue.SimpleQueue[Callable[[], None]] = queue.SimpleQueue()
@@ -1720,10 +1735,12 @@ class WeatherWidget(tk.Tk):
 
         if self.update_check_in_progress:
             if manual:
+                self.update_check_manual = True
                 self.status_var.set("Sovelluspäivityksen tarkistus on jo käynnissä.")
             return
 
         self.update_check_in_progress = True
+        self.update_check_manual = manual
         if manual:
             self.status_var.set("Tarkistetaan sovelluspäivitystä GitHubista...")
 
@@ -1742,6 +1759,8 @@ class WeatherWidget(tk.Tk):
         )
 
     def _handle_update_check_result(self, status: dict, manual: bool) -> None:
+        manual = manual or self.update_check_manual
+        self.update_check_manual = False
         state = status.get("state")
 
         if state == "available":
@@ -2654,7 +2673,7 @@ class WeatherWidget(tk.Tk):
         if self.fetch_in_progress:
             return
 
-        if self.latest_weather is None or self.last_weather_update is None:
+        if self.latest_weather is None or self.last_weather_update is None or self.weather_failure_count:
             self.refresh_weather()
             return
 
@@ -2740,6 +2759,8 @@ class WeatherWidget(tk.Tk):
         self._cancel_job("refresh_job")
         if explicit_search:
             self.refresh_target = (city, selected_place)
+            self.weather_failure_count = 0
+            self.weather_error_notified = False
 
         if self.fetch_in_progress:
             if explicit_search:
@@ -2828,7 +2849,12 @@ class WeatherWidget(tk.Tk):
             resolved_place = _saved_place(retry_place)
             if resolved_place is not None:
                 self.refresh_target = (self.refresh_target[0], resolved_place)
-        self.status_var.set(f"Päivitys epäonnistui: {text} Yritetään uudelleen 30 minuutin päästä.")
+        self.weather_failure_count += 1
+        retry_index = min(self.weather_failure_count, len(WEATHER_RETRY_DELAYS_MS)) - 1
+        retry_delay = WEATHER_RETRY_DELAYS_MS[retry_index]
+        if retry_previous_location and self.latest_weather:
+            retry_delay = REFRESH_INTERVAL_MS
+        self.status_var.set(f"Päivitys epäonnistui: {text} Uusi yritys {retry_delay // 60_000} min kuluttua.")
         self.popup_bg_canvas.itemconfigure(self.hero_updated_label, text="Päivitys epäonnistui")
         # Keep the last successful weather symbol in tray after transient fetch errors.
         # Show the bullet only when we do not have any weather data yet.
@@ -2840,10 +2866,12 @@ class WeatherWidget(tk.Tk):
             self._update_tray_symbol(style.icon_key, f"{city_text}: {current_temp} (päivitys epäonnistui)")
         else:
             self._update_tray_symbol("unknown", f"{APP_NAME}: päivitys epäonnistui")
-        if notify_user or not self.latest_weather:
+        # A modal dialog can close the app or complete a newer request. Schedule
+        # first so its nested event loop cannot leave us overwriting a newer timer.
+        self._schedule_refresh(retry_delay)
+        if (notify_user or not self.latest_weather) and not self.weather_error_notified:
+            self.weather_error_notified = True
             messagebox.showerror(APP_NAME, text)
-        self._schedule_refresh()
-        self._run_pending_city_search()
 
     def _run_pending_city_search(self) -> None:
         city = self.pending_city_search
@@ -2857,9 +2885,10 @@ class WeatherWidget(tk.Tk):
         else:
             self.refresh_weather(city, place)
 
-    def _schedule_refresh(self) -> None:
+    def _schedule_refresh(self, delay_ms: int = REFRESH_INTERVAL_MS) -> None:
         self._cancel_job("refresh_job")
-        self.refresh_job = self.after(REFRESH_INTERVAL_MS, self._run_scheduled_refresh)
+        if not self._is_destroying:
+            self.refresh_job = self.after(delay_ms, self._run_scheduled_refresh)
 
     def _run_scheduled_refresh(self) -> None:
         self.refresh_job = None
@@ -2995,14 +3024,14 @@ class WeatherWidget(tk.Tk):
         rain_mm_unit = _clean_text(daily_units.get("precipitation_sum")) or "mm"
         today_high = format_temperature(_sequence_item(t_max, today_index), self.unit_symbol)
         today_low = format_temperature(_sequence_item(t_min, today_index), self.unit_symbol)
-        humidity_pct = format_metric(current.get("relative_humidity_2m"), "%")
+        humidity_pct = format_metric(current.get("relative_humidity_2m"), "%", minimum=0, maximum=100)
         next_hours_rain_prob = max_precipitation_probability_next_hours(weather_data)
         if next_hours_rain_prob is not None:
             today_rain_prob = f"{next_hours_rain_prob}%"
         else:
-            today_rain_prob = format_metric(_sequence_item(daily_rain_prob, today_index), "%")
-        today_rain_mm = format_metric(_sequence_item(rain_sum, today_index), f" {rain_mm_unit}", decimals=1)
-        wind_speed_ms = format_metric(current.get("wind_speed_10m"), " m/s", decimals=1)
+            today_rain_prob = format_metric(_sequence_item(daily_rain_prob, today_index), "%", minimum=0, maximum=100)
+        today_rain_mm = format_metric(_sequence_item(rain_sum, today_index), f" {rain_mm_unit}", decimals=1, minimum=0)
+        wind_speed_ms = format_metric(current.get("wind_speed_10m"), " m/s", decimals=1, minimum=0)
         wind_direction = format_wind_direction(current.get("wind_direction_10m"))
         today_sunrise = format_time_short(_sequence_item(sunrise_list, today_index))
         today_sunset = format_time_short(_sequence_item(sunset_list, today_index))
@@ -3058,6 +3087,8 @@ class WeatherWidget(tk.Tk):
         if city_changed or place_changed or self._settings_save_pending:
             self._persist_settings()
         self.fetch_in_progress = False
+        self.weather_failure_count = 0
+        self.weather_error_notified = False
         self._schedule_refresh()
         self._run_pending_city_search()
 

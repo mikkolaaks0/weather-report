@@ -176,7 +176,11 @@ function Restore-ShortcutSnapshot {
 }
 
 function Assert-PortablePackage {
-    param([string]$Directory)
+    param([string]$Directory, [string]$ExpectedVersion)
+
+    if (-not $ExpectedVersion -or $ExpectedVersion -cnotmatch '^v?\d+\.\d+\.\d+$') {
+        throw "Invalid release version: $ExpectedVersion"
+    }
 
     $requiredFiles = @(
         'WeatherReport.exe',
@@ -194,6 +198,24 @@ function Assert-PortablePackage {
         Select-Object -First 1
     if (-not $pythonRuntime) {
         throw 'The downloaded package is missing the Python runtime.'
+    }
+    # v0.1.1 predates bundled metadata. New releases must include it and assets.
+    $version = $ExpectedVersion.TrimStart('v')
+    if ([version]$version -ge [version]'0.1.2') {
+        $metadataPath = Join-Path $Directory '_internal\app_metadata.json'
+        $metadata = Get-Content -LiteralPath $metadataPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($metadata.version -cne $version) {
+            throw 'The package version does not match the selected release.'
+        }
+        $null = [datetime]::ParseExact($metadata.date, 'dd.MM.yyyy', [Globalization.CultureInfo]::InvariantCulture)
+        foreach ($asset in @(
+            'weather-icons\unknown.png', 'weather-icons\cloud.png',
+            'metric-icons\wind.png', 'fonts\Exo2-Regular.ttf'
+        )) {
+            if (-not (Test-Path -LiteralPath (Join-Path $Directory "_internal\assets\$asset") -PathType Leaf)) {
+                throw "The downloaded package is missing an asset: $asset"
+            }
+        }
     }
 }
 
@@ -274,7 +296,7 @@ if (-not $stagedExePath) {
     throw "$exeName was not found in the downloaded package."
 }
 $stagedAppDir = Split-Path -Parent $stagedExePath
-Assert-PortablePackage -Directory $stagedAppDir
+Assert-PortablePackage -Directory $stagedAppDir -ExpectedVersion $release.tag_name
 
 $shortcutPaths = @()
 if (-not $NoStartMenuShortcut) {

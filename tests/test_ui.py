@@ -21,6 +21,66 @@ class TimerLifecycleTests(unittest.TestCase):
         self.widget = main.WeatherWidget()
         self.addCleanup(self.widget.destroy)
 
+    def test_outage_retries_are_bounded_and_success_restores_normal_refresh(self) -> None:
+        widget = self.widget
+        with patch.object(main.messagebox, "showerror") as dialog, patch.object(widget, "after", wraps=widget.after) as after:
+            for index, delay in enumerate((60_000, 120_000, 300_000, 300_000)):
+                previous_job = widget.refresh_job
+                widget._show_error("offline")
+                self.assertEqual(after.call_args.args[0], delay)
+                self.assertEqual(widget.weather_failure_count, index + 1)
+                if previous_job:
+                    self.assertNotIn(previous_job, widget.tk.call("after", "info"))
+            dialog.assert_called_once()
+            weather = {"current": {"weather_code": 3, "temperature_2m": 18}, "daily": {"time": ["2026-09-11"]}}
+            widget._apply_weather({"name": "Espoo"}, weather, "Espoo")
+            self.assertEqual(after.call_args.args[0], main.REFRESH_INTERVAL_MS)
+            self.assertEqual(widget.weather_failure_count, 0)
+            self.assertFalse(widget.weather_error_notified)
+            widget._show_error("offline again")
+            self.assertEqual(after.call_args.args[0], 60_000)
+            dialog.assert_called_once()
+
+    def test_opening_card_retries_failed_target_even_when_old_weather_is_recent(self) -> None:
+        widget = self.widget
+        widget.latest_weather = {"current": {}}
+        widget.last_weather_update = main.datetime.now()
+        with patch.object(widget, "refresh_weather") as refresh:
+            widget._ensure_fresh_weather()
+            refresh.assert_not_called()
+            widget.weather_failure_count = 1
+            widget._ensure_fresh_weather()
+            refresh.assert_called_once()
+            widget.fetch_in_progress = True
+            widget._ensure_fresh_weather()
+            refresh.assert_called_once()
+
+    def test_explicit_city_search_resets_outage_backoff_and_notification(self) -> None:
+        widget = self.widget
+        widget.weather_failure_count = 3
+        widget.weather_error_notified = True
+        widget.refresh_weather("Helsinki")
+        self.assertEqual(widget.weather_failure_count, 0)
+        self.assertFalse(widget.weather_error_notified)
+
+    def test_modal_error_does_not_overwrite_a_newer_successful_refresh_timer(self) -> None:
+        widget = self.widget
+        weather = {"current": {"weather_code": 3, "temperature_2m": 18}, "daily": {"time": ["2026-09-11"]}}
+        def complete_during_dialog(*_args):
+            widget._apply_weather({"name": "Espoo"}, weather, "Espoo")
+        with patch.object(main.messagebox, "showerror", side_effect=complete_during_dialog), patch.object(widget, "after", wraps=widget.after) as after:
+            widget._show_error("offline")
+        self.assertEqual(after.call_args.args[0], main.REFRESH_INTERVAL_MS)
+        self.assertEqual(widget.weather_failure_count, 0)
+
+    def test_closing_during_error_dialog_leaves_no_refresh_timer(self) -> None:
+        widget = self.widget
+        with patch.object(main.messagebox, "showerror", side_effect=lambda *_args: widget.destroy()):
+            widget._show_error("offline")
+        self.assertIsNone(widget.refresh_job)
+        widget._schedule_refresh()
+        self.assertIsNone(widget.refresh_job)
+
     def test_manual_update_check_replaces_the_startup_check(self) -> None:
         widget = self.widget
         startup_check = widget.update_job

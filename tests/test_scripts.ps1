@@ -93,7 +93,7 @@ try {
         New-Item -ItemType Directory -Path $package | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $package 'WeatherReport.exe'), 'placeholder')
         $rejected = $false
-        try { Assert-PortablePackage $package } catch { $rejected = $true }
+        try { Assert-PortablePackage $package 'v0.1.1' } catch { $rejected = $true }
         Assert-True $rejected 'An executable without its Tk runtime was accepted'
         foreach ($relativePath in @(
             '_internal\_tkinter.pyd',
@@ -105,11 +105,36 @@ try {
             [System.IO.File]::WriteAllText($path, 'placeholder')
         }
         $rejected = $false
-        try { Assert-PortablePackage $package } catch { $rejected = $true }
+        try { Assert-PortablePackage $package 'v0.1.1' } catch { $rejected = $true }
         Assert-True $rejected 'A package without Python was accepted'
         [System.IO.File]::WriteAllText((Join-Path $package '_internal\python313.dll'), 'placeholder')
         # Released v0.1.1 lacks the later weather icon library but must remain installable.
-        Assert-PortablePackage $package
+        Assert-PortablePackage $package 'v0.1.1'
+        $rejected = $false
+        try { Assert-PortablePackage $package 'v0.1.2' } catch { $rejected = $true }
+        Assert-True $rejected 'A modern package without its required metadata was accepted'
+        $packageMetadata = Join-Path $package '_internal\app_metadata.json'
+        [System.IO.File]::WriteAllText($packageMetadata, '{"version":"0.1.2","date":"07.09.2026"}')
+        $rejected = $false
+        try { Assert-PortablePackage $package 'v0.1.2' } catch { $rejected = $true }
+        Assert-True $rejected 'A modern package without its assets was accepted'
+        foreach ($asset in @('weather-icons\unknown.png', 'weather-icons\cloud.png', 'metric-icons\wind.png', 'fonts\Exo2-Regular.ttf')) {
+            $assetPath = Join-Path $package "_internal\assets\$asset"
+            New-Item -ItemType Directory -Path (Split-Path -Parent $assetPath) -Force | Out-Null
+            [System.IO.File]::WriteAllText($assetPath, 'placeholder')
+        }
+        Assert-PortablePackage $package 'v0.1.2'
+        foreach ($expected in @('', 'v0.1.3', 'bad', 'v1.2.3-rc1')) {
+            $rejected = $false
+            try { Assert-PortablePackage $package $expected } catch { $rejected = $true }
+            Assert-True $rejected 'Package version mismatch was not rejected'
+        }
+        foreach ($invalid in @('{"version":"0.1.2","date":"31.02.2026"}', '{broken')) {
+            [System.IO.File]::WriteAllText($packageMetadata, $invalid)
+            $rejected = $false
+            try { Assert-PortablePackage $package 'v0.1.2' } catch { $rejected = $true }
+            Assert-True $rejected 'Invalid package metadata was not rejected'
+        }
 
         # Exercise the installer's actual failure handler, without running downloads or launchers.
         $ast = Get-ScriptAst 'install.ps1'

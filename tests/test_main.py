@@ -118,6 +118,20 @@ class WeatherStyleTests(unittest.TestCase):
 
 
 class DataFormattingTests(unittest.TestCase):
+    def test_metrics_reject_impossible_ranges_and_do_not_show_negative_zero(self) -> None:
+        for invalid in (-1, 101, float("nan"), "bad", True):
+            self.assertEqual(main.format_metric(invalid, "%", minimum=0, maximum=100), "-")
+        for valid in (0, 50, 100):
+            self.assertEqual(main.format_metric(valid, "%", minimum=0, maximum=100), f"{valid}%")
+        self.assertEqual(main.format_metric(-0.01, decimals=1), "0.0")
+        self.assertEqual(main.format_metric(-0.01, minimum=0), "-")
+        self.assertEqual(main.format_temperature(-12, "C"), "-12\N{DEGREE SIGN}C")
+
+    def test_date_without_time_is_not_reported_as_a_midnight_sun_event(self) -> None:
+        self.assertEqual(main.format_time_short("2026-09-11"), "-")
+        self.assertEqual(main.format_time_short("2026-09-11T00:00"), "00:00")
+        self.assertEqual(main.format_time_short("2026-09-11 06:15"), "06:15")
+
     def test_numeric_formatters_reject_non_finite_and_invalid_values(self) -> None:
         degree = "\N{DEGREE SIGN}"
         self.assertEqual(main.format_temperature("18.6", "C"), f"19{degree}C")
@@ -1070,11 +1084,34 @@ class UpdateLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
         self.widget = object.__new__(main.WeatherWidget)
         self.widget.update_check_in_progress = True
+        self.widget.update_check_manual = False
         self.widget.status_var = Mock()
         self.widget._start_background_worker = Mock()
         self.widget._call_on_ui_thread = lambda callback: callback()
         self.widget.after = Mock(return_value="restart-job")
         self.widget.destroy = Mock()
+
+    def test_manual_click_during_automatic_check_still_shows_the_result(self) -> None:
+        for state in ("current", "error", "dirty"):
+            with self.subTest(state=state):
+                widget = self.widget
+                widget.update_check_in_progress = False
+                widget._start_background_worker.reset_mock()
+                widget.check_for_app_update()
+                widget.check_for_app_update(manual=True)
+                widget.check_for_app_update(manual=True)
+                widget._start_background_worker.assert_called_once()
+                with patch.object(main.messagebox, "showinfo") as info, patch.object(main.messagebox, "showerror") as error:
+                    widget._handle_update_check_result({"state": state, "message": "Result"}, False)
+                self.assertEqual(info.call_count, state != "error")
+                self.assertEqual(error.call_count, state == "error")
+                self.assertFalse(widget.update_check_manual)
+                self.assertFalse(widget.update_check_in_progress)
+
+    def test_automatic_current_result_does_not_open_a_dialog(self) -> None:
+        with patch.object(main.messagebox, "showinfo") as info:
+            self.widget._handle_update_check_result({"state": "current"}, False)
+        info.assert_not_called()
 
     def test_update_stays_exclusive_through_confirmation_and_restart(self) -> None:
         widget = self.widget
@@ -1152,6 +1189,8 @@ class WeatherResultTests(unittest.TestCase):
         widget.unit_symbol = "C"
         widget.settings = {"city": "Espoo", "popup_theme": main.DEFAULT_POPUP_THEME}
         widget._settings_save_pending = False
+        widget.weather_failure_count = 0
+        widget.weather_error_notified = False
         widget.city_var = Mock()
         widget.detail_city_var = Mock()
         widget.detail_city_var.get.return_value = entry
@@ -1295,6 +1334,18 @@ class WeatherResultTests(unittest.TestCase):
         self.assertEqual(widget.settings["city"], "Espoo")
         self.assertFalse(widget.fetch_in_progress)
 
+    def test_invalid_optional_metrics_do_not_discard_valid_current_weather(self) -> None:
+        widget = self.make_result_widget()
+        weather = {
+            "current": {"weather_code": 3, "temperature_2m": -12, "relative_humidity_2m": 101, "wind_speed_10m": -5},
+            "daily": {"time": ["2026-09-11"], "precipitation_sum": [-1], "precipitation_probability_max": [120], "sunrise": ["2026-09-11"]},
+        }
+        widget._apply_weather({"name": "Espoo"}, weather, "Espoo")
+        metrics = widget._apply_today_detail_metrics.call_args.kwargs
+        for key in ("rain_mm", "rain_probability", "humidity", "wind", "sunrise"):
+            self.assertEqual(metrics[key], "-", key)
+        self.assertIs(widget.latest_weather, weather)
+
     def test_superseded_weather_success_does_not_replace_the_selected_city(self) -> None:
         widget = self.make_result_widget("Richmond")
         widget.fetch_in_progress = True
@@ -1368,7 +1419,7 @@ class WeatherResultTests(unittest.TestCase):
         self.assertTrue(any("epäonnistui" in text for text in updates))
         dialog.assert_not_called()
         self.assertEqual(widget._schedule_refresh.call_count, 2)
-        self.assertEqual(widget._run_pending_city_search.call_count, 2)
+        self.assertEqual(widget._run_pending_city_search.call_count, 1)
 
     def test_settings_failure_warns_once_and_retries_with_latest_preferences(self) -> None:
         widget = self.make_result_widget()
@@ -1484,6 +1535,7 @@ class WeatherResultTests(unittest.TestCase):
     def test_clock_moving_backwards_does_not_keep_old_weather_fresh(self) -> None:
         widget = object.__new__(main.WeatherWidget)
         widget.fetch_in_progress = False
+        widget.weather_failure_count = 0
         widget.latest_weather = {"current": {}}
         widget.refresh_weather = Mock()
         widget.last_weather_update = main.datetime.now() + main.timedelta(hours=1)

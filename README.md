@@ -20,6 +20,8 @@ from the system tray.
 - Hourly rain probabilities follow Open-Meteo's preceding-hour timestamps,
   including partially overlapping hours at the edges of that window
 - Automatic weather refresh every 30 minutes
+- Failed requests retry after 1, 2, then 5 minutes until recovery; a successful
+  refresh restores the 30-minute interval without repeating outage dialogs
 - Failed refreshes are marked on the popup while keeping the last valid forecast
 - Network failures during a city change retry the selected location, not the old city
 - Daily metrics and forecast days follow the location's date, including across midnight
@@ -69,6 +71,10 @@ installation step fails after replacement, recovery restores the previous app
 directory and the original desktop, Start Menu, and startup shortcuts, including
 removing shortcuts that were created by the failed attempt. Recovery errors are
 reported rather than treated as a successful installation.
+For releases from v0.1.2 onward, installation also checks that bundled version
+metadata matches the selected release and that core icon/font assets exist.
+Missing or malformed metadata is rejected before replacing the working app;
+the older v0.1.1 package remains supported without that metadata.
 When launching is enabled, the installer watches for an immediate exit of the
 new app for 1.5 seconds before removing the previous version's backup. An early
 exit triggers the same recovery path; this is a startup check, not a full health
@@ -104,6 +110,12 @@ good forecast visible. A name that cannot be found leaves refresh targeting the
 previous location until another search is submitted.
 Coordinates resolved by a regular name search are also retained for retries if
 the following weather request fails; successful geocoding is not repeated.
+Opening the card after a failed request retries its target even when the last
+successful forecast is recent. A new submitted search resets the retry backoff.
+Unknown names return refresh to the previous location and its normal interval
+when a previous forecast exists. Impossible optional values (such as humidity
+above 100% or negative wind speed) display as missing without hiding valid
+weather data. A missing sun-event time is never presented as midnight.
 Suggestions use the existing Open-Meteo geocoding service, with no location
 permission or additional dependencies. See its [matching rules](https://open-meteo.com/en/docs/geocoding-api).
 
@@ -135,13 +147,13 @@ keeps the previous working link intact.
 Create a portable release package:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build_release.ps1 -Version 0.1.2 -SkipInstaller
+powershell -ExecutionPolicy Bypass -File .\build_release.ps1 -SkipInstaller
 ```
 
 Create a portable package and an installer, when Inno Setup is installed:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build_release.ps1 -Version 0.1.2
+powershell -ExecutionPolicy Bypass -File .\build_release.ps1
 ```
 
 Release artifacts are written to `release/`. `SHA256SUMS.txt` contains only the
@@ -179,6 +191,8 @@ Coverage includes:
   overrides, Unicode paths, hidden untracked files, and release-source validation.
 - Release metadata mismatches, hourly probability boundaries across midnight,
   and the fallback window's requested size when the tray is unavailable.
+- Outage backoff and recovery, optional metric ranges, manual requests during
+  background update checks, and closing or receiving weather during error dialogs.
 
 Windows tests render a hidden popup and inspect temporary `.lnk` files. Git tests
 use local repositories without contacting GitHub. Installer and launcher tests
@@ -203,15 +217,16 @@ private runtime font on Windows. Users do not need to install the font manually.
 The GitHub Actions `Release` workflow builds and publishes a portable release
 when a version tag is pushed. No local GitHub CLI login is needed. Set the
 version and date in `app_metadata.json`, commit and push `main`, then tag that
-commit. For example, when publishing version `0.1.2`:
+commit. For example, when publishing version `0.1.3`:
 
 ```powershell
-git tag -a v0.1.2 -m "Weather Report v0.1.2"
-git push origin v0.1.2
+git tag -a v0.1.3 -m "Weather Report v0.1.3"
+git push origin v0.1.3
 ```
 
-The workflow verifies that the tag matches the app metadata and belongs to
-`main`, runs the tests, and builds the package on Windows. It uploads the ZIP
+The workflow requires the reusable `Tests` workflow to pass on both Python 3.10
+and 3.13 before building or publishing. It verifies that the tag matches the app
+metadata and belongs to `main`, and builds the package on Windows. It uploads the ZIP
 and `SHA256SUMS.txt` to a draft release before publishing it as the latest
 release. A failed build or upload does not replace the latest published version.
 
@@ -233,7 +248,7 @@ powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -SkipInstaller
 Publish a specific version:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -Version v0.1.2 -SkipInstaller
+powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -Version v0.1.3 -SkipInstaller
 ```
 
 The publish script requires a clean `main` branch, builds the portable package,
@@ -280,7 +295,9 @@ development work. Source runs also perform the same non-destructive update check
 shortly after startup. The check reports the running version and offers a restart
 when the checkout has already changed while the app was open.
 Manual checks cancel the pending startup check, so the same update is not
-offered again seconds later. An early weather request likewise replaces the
+offered again seconds later. If a background check is already running, clicking
+the tray update action waits for that same check and displays its result instead
+of silently swallowing the manual request. An early weather request likewise replaces the
 startup weather request; each completed request schedules the next refresh.
 The updater clears inherited repository-local Git context and reads Git output
 as UTF-8, keeping commands scoped to this checkout and supporting international
