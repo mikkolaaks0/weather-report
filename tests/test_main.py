@@ -576,6 +576,9 @@ class SettingsAndShortcutTests(unittest.TestCase):
     def test_shortcut_creation_uses_noninteractive_powershell(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             shortcut_path = Path(temporary_dir) / "Weather Report.lnk"
+            def write_shortcut(*_args, **_kwargs):
+                shortcut_path.touch()
+                return subprocess.CompletedProcess([], 0, stdout="")
             with (
                 patch.object(main.shutil, "which", return_value=r"C:\Windows\powershell.exe"),
                 patch.object(
@@ -583,7 +586,7 @@ class SettingsAndShortcutTests(unittest.TestCase):
                     "_resolve_shortcut_target",
                     return_value=("target.exe", "", temporary_dir, "target.exe"),
                 ),
-                patch.object(main.subprocess, "run", side_effect=lambda *_args, **_kwargs: shortcut_path.touch()) as run,
+                patch.object(main.subprocess, "run", side_effect=write_shortcut) as run,
             ):
                 main._write_windows_shortcut(shortcut_path)
 
@@ -646,7 +649,7 @@ class SettingsAndShortcutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             shortcut = Path(directory) / "Weather Report's test.lnk"
             shortcut.write_bytes(b"old invalid shortcut")
-            target = str(Path(directory) / "WeatherReport.exe")
+            target = str(main.APP_EXECUTABLE_PATH)
             with patch.object(main, "_resolve_shortcut_target", return_value=(target, "--test", directory, target)):
                 main.create_windows_shortcut(shortcut)
             command = (
@@ -1084,6 +1087,7 @@ class UpdateSafetyTests(unittest.TestCase):
 class UpdateLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
         self.widget = object.__new__(main.WeatherWidget)
+        self.widget._is_destroying = False
         self.widget.update_check_in_progress = True
         self.widget.update_check_manual = False
         self.widget.status_var = Mock()

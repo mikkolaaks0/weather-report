@@ -55,6 +55,37 @@ class TimerLifecycleTests(unittest.TestCase):
             widget._ensure_fresh_weather()
             refresh.assert_called_once()
 
+    def test_opening_card_after_location_midnight_refreshes_recent_weather(self) -> None:
+        widget = self.widget
+        now = main.datetime(2026, 9, 13, 21, 1, tzinfo=main.timezone.utc)
+        widget.latest_weather = {
+            "current": {"time": "2026-09-13T23:45"}, "utc_offset_seconds": 10800,
+        }
+        widget.last_weather_update = now.replace(tzinfo=None) - main.timedelta(minutes=2)
+        with patch.object(main, "datetime", wraps=main.datetime) as clock, patch.object(widget, "refresh_weather") as refresh:
+            clock.now.side_effect = lambda tz=None: now if tz else now.replace(tzinfo=None)
+            widget._ensure_fresh_weather()
+        refresh.assert_called_once_with()
+
+    def test_closing_during_update_confirmation_does_not_update_or_restart(self) -> None:
+        widget = self.widget
+        with (
+            patch.object(main.messagebox, "askyesno", side_effect=lambda *_args: (widget.destroy(), True)[1]),
+            patch.object(widget, "_apply_app_update") as update,
+        ):
+            widget._handle_update_check_result({"state": "available"}, True)
+        update.assert_not_called()
+
+    def test_closing_during_restart_confirmation_does_not_launch_a_new_app(self) -> None:
+        widget = self.widget
+        with (
+            patch.object(main.messagebox, "askyesno", side_effect=lambda *_args: (widget.destroy(), True)[1]),
+            patch.object(main, "restart_application") as restart,
+        ):
+            widget._handle_update_check_result({"state": "restart_available"}, True)
+        restart.assert_not_called()
+        self.assertIsNone(widget.restart_job)
+
     def test_explicit_city_search_resets_outage_backoff_and_notification(self) -> None:
         widget = self.widget
         widget.weather_failure_count = 3

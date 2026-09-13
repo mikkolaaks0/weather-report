@@ -112,6 +112,9 @@ Coordinates resolved by a regular name search are also retained for retries if
 the following weather request fails; successful geocoding is not repeated.
 Opening the card after a failed request retries its target even when the last
 successful forecast is recent. A new submitted search resets the retry backoff.
+Opening it after midnight at the forecast location also requests a fresh forecast,
+even if the previous request completed less than 15 minutes ago. This uses the
+location's UTC offset from Open-Meteo, not the computer's date.
 Unknown names return refresh to the previous location and its normal interval
 when a previous forecast exists. Impossible optional values (such as humidity
 above 100% or negative wind speed) display as missing without hiding valid
@@ -141,6 +144,12 @@ The local `.venv` is excluded from Git status so installing its dependencies doe
 not block source updates.
 The app replaces startup and desktop shortcuts atomically: an interrupted write
 keeps the previous working link intact.
+Automatic startup-link repair only changes links recognized as belonging to the
+running installation. Opening an older copy or a separate source checkout does
+not redirect another installation's startup link. Unreadable or unrecognized
+links are left untouched; explicitly enabling startup from the tray still selects
+the running copy. Shortcut inspection and creation preserve Unicode paths and
+run in the background with a bounded timeout.
 
 ## Build
 
@@ -193,6 +202,8 @@ Coverage includes:
   and the fallback window's requested size when the tray is unavailable.
 - Outage backoff and recovery, optional metric ranges, manual requests during
   background update checks, and closing or receiving weather during error dialogs.
+- Startup-link ownership across installations, Unicode shortcut inspection,
+  location-midnight refreshes, and closing during update/restart confirmations.
 
 Windows tests render a hidden popup and inspect temporary `.lnk` files. Git tests
 use local repositories without contacting GitHub. Installer and launcher tests
@@ -217,15 +228,17 @@ private runtime font on Windows. Users do not need to install the font manually.
 The GitHub Actions `Release` workflow builds and publishes a portable release
 when a version tag is pushed. No local GitHub CLI login is needed. Set the
 version and date in `app_metadata.json`, commit and push `main`, then tag that
-commit. For example, when publishing version `0.1.4`:
+commit. For example, when publishing version `0.1.5`:
 
 ```powershell
-git tag -a v0.1.4 -m "Weather Report v0.1.4"
-git push origin v0.1.4
+git tag -a v0.1.5 -m "Weather Report v0.1.5"
+git push origin v0.1.5
 ```
 
 The workflow requires the reusable `Tests` workflow to pass on both Python 3.10
-and 3.13 before building or publishing. It verifies that the tag matches the app
+and 3.13 before building or publishing. Branch pushes and pull requests run the
+standalone tests; version tags run them through `Release`, without a duplicate
+standalone tag run. It verifies that the tag matches the app
 metadata and belongs to `main`, and builds the package on Windows. It uploads the ZIP
 and `SHA256SUMS.txt` to a draft release before publishing it as the latest
 release. A failed build or upload does not replace the latest published version.
@@ -248,7 +261,7 @@ powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -SkipInstaller
 Publish a specific version:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -Version v0.1.4 -SkipInstaller
+powershell -ExecutionPolicy Bypass -File .\publish_release.ps1 -Version v0.1.5 -SkipInstaller
 ```
 
 The publish script requires a clean `main` branch, builds the portable package,
@@ -309,6 +322,8 @@ restart and same-size edits with identical timestamps are still detected.
 Only one update
 can run at a time, including confirmation and restart. In-app restarts reuse the
 working Python environment instead of searching for another Python installation.
+Closing the app while an update or restart confirmation is open cancels that
+action; dismissing the dialog cannot start an update or reopen the closed app.
 The current process stays open if the replacement cannot be launched or exits
 during the initial 1.5-second startup check; this is an early-exit check, not a
 full health check. Update failures are shown in a dialog.

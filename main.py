@@ -1,6 +1,7 @@
 import hashlib
 import json
 import math
+import ntpath
 import os
 import queue
 import shutil
@@ -12,7 +13,7 @@ import time
 import tkinter as tk
 import webbrowser
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from http.client import IncompleteRead
 from pathlib import Path
 from tkinter import messagebox
@@ -870,6 +871,16 @@ def _today_forecast_index(weather: dict) -> int:
     return weather["daily"]["time"].index(current_time.date().isoformat())
 
 
+def _weather_date_changed(weather: dict) -> bool:
+    current_time = _parse_open_meteo_time(_as_dict(weather.get("current")).get("time"))
+    offset = _coerce_number(weather.get("utc_offset_seconds"))
+    if current_time is None or offset is None or not -86400 < offset < 86400:
+        return False
+    # Use the forecast location's clock, not the computer's local date.
+    location_now = datetime.now(timezone.utc) + timedelta(seconds=offset)
+    return location_now.date() != current_time.date()
+
+
 def resolve_weather_style(code: int | float | str | None, is_day: bool = True) -> WeatherStyle:
     numeric_code = _coerce_number(code)
     code = int(numeric_code) if numeric_code is not None and numeric_code.is_integer() else None
@@ -1225,19 +1236,39 @@ def create_windows_shortcut(shortcut_path: Path) -> None:
         os.replace(staged_path, shortcut_path)
 
 
+def _run_shortcut_script(script: str) -> str:
+    shell_path = shutil.which("powershell") or shutil.which("pwsh")
+    if not shell_path:
+        raise OSError("PowerShelliä ei löytynyt pikakuvakkeen käsittelyyn.")
+
+    try:
+        result = subprocess.run(
+            [shell_path, "-NoProfile", "-NonInteractive", "-Sta", "-Command", script],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            **_hidden_subprocess_kwargs(),
+        )
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or error.stdout or "").strip()
+        raise OSError(f"Pikakuvakkeen käsittely epäonnistui: {details or error}") from error
+    except subprocess.TimeoutExpired as error:
+        raise OSError("Pikakuvakkeen käsittely aikakatkaistiin.") from error
+    return result.stdout
+
+
 def _write_windows_shortcut(shortcut_path: Path) -> None:
     if IS_FROZEN and not APP_EXECUTABLE_PATH.exists():
         raise FileNotFoundError(f"Käynnistyskohdetta ei löytynyt: {APP_EXECUTABLE_PATH.name}")
-
-    shell_path = shutil.which("powershell") or shutil.which("pwsh")
-    if not shell_path:
-        raise OSError("PowerShelliä ei löytynyt pikakuvakkeen luontiin.")
 
     shortcut_target = str(shortcut_path)
     target_path, arguments, working_dir, icon_path = _resolve_shortcut_target()
 
     script = (
         "$ErrorActionPreference = 'Stop'; "
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
         "$WshShell = New-Object -ComObject WScript.Shell; "
         f"$Shortcut = $WshShell.CreateShortcut('{_ps_escape(shortcut_target)}'); "
         f"$Shortcut.TargetPath = '{_ps_escape(target_path)}'; "
@@ -1246,23 +1277,54 @@ def _write_windows_shortcut(shortcut_path: Path) -> None:
         f"$Shortcut.IconLocation = '{_ps_escape(icon_path)}'; "
         "$Shortcut.Save()"
     )
-    try:
-        subprocess.run(
-            [shell_path, "-NoProfile", "-NonInteractive", "-Sta", "-Command", script],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=20,
-            **_hidden_subprocess_kwargs(),
-        )
-    except subprocess.CalledProcessError as error:
-        details = (error.stderr or error.stdout or "").strip()
-        raise OSError(f"Pikakuvakkeen luonti epäonnistui: {details or error}") from error
-    except subprocess.TimeoutExpired as error:
-        raise OSError("Pikakuvakkeen luonti aikakatkaistiin.") from error
+    _run_shortcut_script(script)
 
     if not shortcut_path.is_file():
         raise OSError("Pikakuvaketiedostoa ei syntynyt.")
+
+
+def _read_windows_shortcut(shortcut_path: Path) -> dict:
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "$shell = New-Object -ComObject WScript.Shell; "
+        f"$link = $shell.CreateShortcut('{_ps_escape(str(shortcut_path))}'); "
+        "@{Target=$link.TargetPath; Arguments=$link.Arguments} | ConvertTo-Json -Compress"
+    )
+    try:
+        result = json.loads(_run_shortcut_script(script))
+    except (ValueError, TypeError) as error:
+        raise OSError("Pikakuvakkeen kohdetta ei voitu lukea.") from error
+    if not isinstance(result, dict) or not all(isinstance(result.get(key), str) for key in ("Target", "Arguments")):
+        raise OSError("Pikakuvakkeen kohdetta ei voitu lukea.")
+    return result
+
+
+def _shortcut_belongs_to_current_installation(shortcut: dict) -> bool:
+    target = ntpath.normcase(shortcut["Target"])
+    arguments = ntpath.normcase(shortcut["Arguments"].strip())
+    if IS_FROZEN:
+        return target == ntpath.normcase(str(APP_EXECUTABLE_PATH)) and not arguments
+    scripts = [PROJECT_DIR / name for name in ("main.py", "start_weather_app.vbs", "start_weather_app.bat")]
+    if not arguments and target in {ntpath.normcase(str(path)) for path in scripts}:
+        return True
+    if ntpath.basename(target) not in {"python.exe", "pythonw.exe", "wscript.exe", "cscript.exe"}:
+        return False
+    # Only recognize the single-script launch formats created by this app.
+    # Unknown formats and other installations must never be rewritten silently.
+    return arguments in {
+        ntpath.normcase(value)
+        for path in scripts
+        for value in (str(path), f'"{path}"')
+    }
+
+
+def repair_startup_shortcut() -> None:
+    with STARTUP_SHORTCUT_LOCK:
+        paths = [path for path in get_startup_shortcut_paths() if path.is_file()]
+        if not paths or not all(_shortcut_belongs_to_current_installation(_read_windows_shortcut(path)) for path in paths):
+            return
+        set_startup_enabled(True)
 
 
 def set_startup_enabled(enabled: bool) -> None:
@@ -1724,7 +1786,7 @@ class WeatherWidget(tk.Tk):
             try:
                 with STARTUP_SHORTCUT_LOCK:
                     if is_startup_enabled():
-                        set_startup_enabled(True)
+                        repair_startup_shortcut()
             except Exception as error:  # noqa: BLE001
                 self._call_on_ui_thread(lambda error=str(error): report_error(error))
 
@@ -1769,6 +1831,8 @@ class WeatherWidget(tk.Tk):
                 f"GitHubissa on uudempi versio kuin {APP_VERSION_LABEL}. "
                 "Päivitetäänkö sovellus nyt ja käynnistetäänkö se uudelleen?",
             )
+            if self._is_destroying:
+                return
             if should_update:
                 self._apply_app_update()
             else:
@@ -1782,6 +1846,8 @@ class WeatherWidget(tk.Tk):
                 "Sovelluksen tiedostot ovat jo päivittyneet levylle. "
                 "Käynnistetäänkö sovellus uudelleen nyt?",
             )
+            if self._is_destroying:
+                return
             if should_restart:
                 self._finish_app_update(None)
             else:
@@ -2678,7 +2744,11 @@ class WeatherWidget(tk.Tk):
             return
 
         age = datetime.now() - self.last_weather_update
-        if age < timedelta(0) or age > timedelta(minutes=FRESH_WEATHER_MAX_AGE_MINUTES):
+        if (
+            age < timedelta(0)
+            or age > timedelta(minutes=FRESH_WEATHER_MAX_AGE_MINUTES)
+            or _weather_date_changed(self.latest_weather)
+        ):
             self.refresh_weather()
 
     def _search_from_popup(self) -> None:
