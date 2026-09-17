@@ -237,7 +237,9 @@ class CitySearch(tk.Frame):
 
     def _hover(self, event) -> None:
         if self.rows:
-            self._select(self.listbox.nearest(event.y))
+            index = self.listbox.nearest(event.y)
+            if self.listbox.curselection() != (index,):
+                self._select(index)
 
     def _click(self, event) -> str:
         if self.rows:

@@ -90,6 +90,22 @@ class LocationSearchTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Windows Tk interaction tests")
 class AutocompleteTests(unittest.TestCase):
+    def test_hover_only_updates_selection_when_the_row_changes(self):
+        self.variable.set("Hel")
+        self.control._request()
+        self.control._receive(self.control.generation, [place(), place("Helsingborg")], False)
+        with (
+            patch.object(self.control.listbox, "nearest", return_value=1),
+            patch.object(self.control, "_select", wraps=self.control._select) as select,
+        ):
+            for _ in range(20):
+                self.control._hover(SimpleNamespace(y=25))
+            select.assert_called_once_with(1)
+        self.assertEqual(self.control.listbox.curselection(), (1,))
+        self.assertEqual(self.control.listbox.index("active"), 1)
+        self.control.confirm()
+        self.submit.assert_called_once_with("Helsingborg", place("Helsingborg"))
+
     def setUp(self):
         self.root = tk.Tk()
         self.root.withdraw()

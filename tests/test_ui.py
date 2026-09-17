@@ -153,6 +153,38 @@ class TimerLifecycleTests(unittest.TestCase):
         self.assertGreaterEqual(width, widget.winfo_reqwidth())
         self.assertGreaterEqual(height, widget.winfo_reqheight())
 
+    def test_repeated_layout_reuses_fonts_and_keeps_canvas_geometry(self) -> None:
+        widget = self.widget
+        widget._layout_popup_content(584, 329)
+        canvas = widget.popup_bg_canvas
+        before = [(item, canvas.coords(item), canvas.bbox(item)) for item in canvas.find_all()]
+        with patch.object(main.tkfont, "Font", wraps=main.tkfont.Font) as create_font:
+            for _ in range(10):
+                widget._layout_popup_content(584, 329)
+            create_font.assert_not_called()
+        self.assertEqual(before, [(item, canvas.coords(item), canvas.bbox(item)) for item in canvas.find_all()])
+
+    def test_weather_stack_does_not_process_unrelated_idle_callbacks(self) -> None:
+        widget = self.widget
+        widget._layout_popup_content(584, 329)
+        idle_callback = Mock()
+        job = widget.after_idle(idle_callback)
+        try:
+            widget._layout_today_weather_stack(552, 58)
+            idle_callback.assert_not_called()
+        finally:
+            widget.after_cancel(job)
+
+    def test_city_measurements_use_the_same_font_as_the_rendered_label(self) -> None:
+        widget = self.widget
+        canvas = widget.popup_bg_canvas
+        self.assertEqual(canvas.itemcget(widget.hero_city_label, "font"), str(widget.city_label_font))
+        widget.city_label_text = "Lappeenranta, Etel\u00e4-Karjala"
+        for size in (18, 20, 14):
+            widget.city_label_font.configure(size=size)
+            widget._layout_popup_content(450, 329)
+            self.assertLess(canvas.bbox(widget.hero_city_label)[2], canvas.bbox(widget.today_condition_label)[0])
+
 
 @unittest.skipUnless(os.name == "nt" and main.ImageTk is not None, "Windows Tk/Pillow smoke test")
 class PopupSmokeTests(unittest.TestCase):

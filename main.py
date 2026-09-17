@@ -1501,6 +1501,8 @@ class WeatherWidget(tk.Tk):
         self.city_label_text = self.city_var.get()
         self.status_var = tk.StringVar(value="Päivitetään säätä...")
         self.clock_var = tk.StringVar(value="--")
+        self.city_label_font = tkfont.Font(self, font=(TEXT_FONT, 18, "bold"))
+        self.stats_font = tkfont.Font(self, font=(TEXT_FONT, 11))
         self.startup_change_in_progress = False
         self.desktop_shortcut_in_progress = False
         self._settings_save_pending = False
@@ -2131,7 +2133,7 @@ class WeatherWidget(tk.Tk):
             0,
             text=self.city_var.get(),
             anchor="nw",
-            font=(TEXT_FONT, 18, "bold"),
+            font=self.city_label_font,
             fill="#F3F7FF",
         )
         self.hero_icon_label = self.popup_bg_canvas.create_image(
@@ -2500,7 +2502,7 @@ class WeatherWidget(tk.Tk):
         if not condition_bounds or not city_coords:
             return
         available = max(0, condition_bounds[0] - city_coords[0] - 16)
-        font = tkfont.Font(self, font=canvas.itemcget(self.hero_city_label, "font"))
+        font = self.city_label_font
         text = self.city_label_text
         if font.measure(text) > available:
             text = text.split(",", 1)[0]
@@ -2520,7 +2522,7 @@ class WeatherWidget(tk.Tk):
         sunrise_icon_extra_left_nudge = 1
         group_gap = 16
         self.popup_bg_canvas.coords(self.today_sunset_time_label, right_text, sun_row_y)
-        self.popup.update_idletasks()
+        # Canvas bounds update synchronously; do not run nested idle callbacks.
         sunset_bbox = self.popup_bg_canvas.bbox(self.today_sunset_time_label)
         sunset_left = sunset_bbox[0] if sunset_bbox else (right_text - 36)
 
@@ -2549,8 +2551,7 @@ class WeatherWidget(tk.Tk):
         top_icon_y_offset = 6
         wind_icon_y_offset = 4
         try:
-            stats_font = tkfont.Font(font=(TEXT_FONT, 11))
-            line_height = stats_font.metrics("linespace")
+            line_height = self.stats_font.metrics("linespace")
         except tk.TclError:
             line_height = 14
 
