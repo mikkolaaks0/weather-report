@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import math
 import ntpath
 import os
@@ -15,6 +16,7 @@ import webbrowser
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from http.client import IncompleteRead
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from tkinter import messagebox
 from tkinter import font as tkfont
@@ -41,6 +43,9 @@ except Exception:  # noqa: BLE001
 
 APP_NAME = "Weather Report"
 APP_SLUG = "weather-report"
+LOGGER = logging.getLogger(APP_SLUG)
+LOGGER.addHandler(logging.NullHandler())
+LOGGER.propagate = False
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_TERMS_URL = "https://open-meteo.com/en/terms"
@@ -50,6 +55,7 @@ WEATHER_RETRY_DELAYS_MS = (60_000, 120_000, 300_000)
 FRESH_WEATHER_MAX_AGE_MINUTES = 15
 UPDATE_CHECK_DELAY_MS = 10 * 1000
 MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_SETTINGS_BYTES = 64 * 1024
 MAX_CITY_QUERY_LENGTH = 120
 TRAY_TOOLTIP_MAX_UTF16_UNITS = 127
 DEFAULT_CITY = "Helsinki"
@@ -148,6 +154,24 @@ STARTUP_SHORTCUT_NAME = f"{APP_SLUG}.lnk"
 LEGACY_STARTUP_SHORTCUT_NAMES = (f"{APP_NAME}.lnk",)
 DESKTOP_SHORTCUT_NAME = f"{APP_NAME}.lnk"
 STARTUP_SHORTCUT_LOCK = threading.RLock()
+
+
+def configure_error_logging() -> bool:
+    if any(isinstance(handler, RotatingFileHandler) for handler in LOGGER.handlers):
+        return True
+    try:
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            SETTINGS_PATH.with_name("weather-report.log"), maxBytes=512 * 1024,
+            backupCount=1, encoding="utf-8", errors="backslashreplace",
+        )
+    except OSError:
+        # Diagnostics must not prevent startup on a read-only or full disk.
+        return False
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    LOGGER.setLevel(logging.WARNING)
+    LOGGER.addHandler(handler)
+    return True
 
 
 class WeatherServiceError(RuntimeError):
@@ -608,8 +632,11 @@ def load_settings() -> dict:
     }
 
     try:
-        with SETTINGS_PATH.open("r", encoding="utf-8") as handle:
-            saved = json.load(handle)
+        with SETTINGS_PATH.open("rb") as handle:
+            payload = handle.read(MAX_SETTINGS_BYTES + 1)
+        if len(payload) > MAX_SETTINGS_BYTES:
+            return settings
+        saved = json.loads(payload.decode("utf-8-sig"))
     except (OSError, ValueError, RecursionError):
         return settings
 
@@ -640,13 +667,15 @@ def load_settings() -> dict:
 def save_settings(settings: dict) -> bool:
     temporary_path = SETTINGS_PATH.with_name(f".{SETTINGS_PATH.name}.{os.getpid()}.tmp")
     try:
+        payload = (json.dumps(settings, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        if len(payload) > MAX_SETTINGS_BYTES:
+            return False
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with temporary_path.open("w", encoding="utf-8") as handle:
-            json.dump(settings, handle, indent=2, ensure_ascii=False)
-            handle.write("\n")
+        with temporary_path.open("wb") as handle:
+            handle.write(payload)
         os.replace(temporary_path, SETTINGS_PATH)
         return True
-    except (OSError, TypeError, ValueError):
+    except (OSError, TypeError, ValueError, RecursionError):
         try:
             temporary_path.unlink(missing_ok=True)
         except OSError:
@@ -1289,13 +1318,15 @@ def _read_windows_shortcut(shortcut_path: Path) -> dict:
         "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
         "$shell = New-Object -ComObject WScript.Shell; "
         f"$link = $shell.CreateShortcut('{_ps_escape(str(shortcut_path))}'); "
-        "@{Target=$link.TargetPath; Arguments=$link.Arguments} | ConvertTo-Json -Compress"
+        "@{Target=$link.TargetPath; Arguments=$link.Arguments; "
+        "WorkingDirectory=$link.WorkingDirectory; IconLocation=$link.IconLocation} | ConvertTo-Json -Compress"
     )
     try:
         result = json.loads(_run_shortcut_script(script))
     except (ValueError, TypeError) as error:
         raise OSError("Pikakuvakkeen kohdetta ei voitu lukea.") from error
-    if not isinstance(result, dict) or not all(isinstance(result.get(key), str) for key in ("Target", "Arguments")):
+    fields = ("Target", "Arguments", "WorkingDirectory", "IconLocation")
+    if not isinstance(result, dict) or not all(isinstance(result.get(key), str) for key in fields):
         raise OSError("Pikakuvakkeen kohdetta ei voitu lukea.")
     return result
 
@@ -1322,8 +1353,23 @@ def _shortcut_belongs_to_current_installation(shortcut: dict) -> bool:
 def repair_startup_shortcut() -> None:
     with STARTUP_SHORTCUT_LOCK:
         paths = [path for path in get_startup_shortcut_paths() if path.is_file()]
-        if not paths or not all(_shortcut_belongs_to_current_installation(_read_windows_shortcut(path)) for path in paths):
+        if not paths:
             return
+        shortcuts = []
+        for path in paths:
+            shortcut = _read_windows_shortcut(path)
+            if not _shortcut_belongs_to_current_installation(shortcut):
+                return
+            shortcuts.append(shortcut)
+        if paths == [get_startup_shortcut_path()]:
+            target, arguments, directory, icon = _resolve_shortcut_target()
+            shortcut = shortcuts[0]
+            expected = {"Target": target, "Arguments": arguments, "WorkingDirectory": directory}
+            if (
+                all(ntpath.normcase(shortcut[key]) == ntpath.normcase(value) for key, value in expected.items())
+                and ntpath.normcase(shortcut["IconLocation"]) in {ntpath.normcase(icon), ntpath.normcase(icon + ",0")}
+            ):
+                return
         set_startup_enabled(True)
 
 
@@ -1576,6 +1622,11 @@ class WeatherWidget(tk.Tk):
                 f"Asetustiedosto: {SETTINGS_PATH}",
             )
 
+    def report_callback_exception(self, exc, value, traceback) -> None:
+        LOGGER.error("Unhandled UI callback", exc_info=(exc, value, traceback))
+        if sys.stderr is not None:
+            super().report_callback_exception(exc, value, traceback)
+
     def _apply_app_icon(self) -> None:
         if APP_LOGO_PATH.exists():
             try:
@@ -1688,6 +1739,7 @@ class WeatherWidget(tk.Tk):
             self.tray_icon = pystray.Icon(APP_SLUG, tray_image, APP_NAME, menu)
             self.tray_icon.run_detached()
         except Exception as error:  # noqa: BLE001
+            LOGGER.exception("Tray icon startup failed; using fallback window")
             self._stop_tray_icon()
             self.status_var.set(f"Tray-kuvakkeen käynnistys epäonnistui: {error}")
             self.deiconify()
@@ -1790,6 +1842,7 @@ class WeatherWidget(tk.Tk):
                     if is_startup_enabled():
                         repair_startup_shortcut()
             except Exception as error:  # noqa: BLE001
+                LOGGER.exception("Automatic startup shortcut repair failed")
                 self._call_on_ui_thread(lambda error=str(error): report_error(error))
 
         self._start_background_worker(worker, on_error=report_error)
@@ -2884,6 +2937,7 @@ class WeatherWidget(tk.Tk):
         except WeatherServiceError as error:
             message = str(error)
         except Exception as error:  # noqa: BLE001
+            LOGGER.exception("Unexpected weather request failure")
             message = f"Säätietojen haku epäonnistui: {error}"
         else:
             return
@@ -2904,6 +2958,7 @@ class WeatherWidget(tk.Tk):
         except WeatherServiceError as error:
             self._show_error(str(error))
         except Exception:  # noqa: BLE001
+            LOGGER.exception("Unexpected weather response handling failure")
             self._show_error("Säädatan käsittely epäonnistui.")
 
     def _show_error(
@@ -2983,6 +3038,9 @@ class WeatherWidget(tk.Tk):
         self.widget_temp_label.config(text=current_temp)
         self.widget_city_label.config(text=city_text)
         self.widget_condition_label.config(text=style.label)
+        if self.tray_icon is None:
+            self._cancel_job("position_job")
+            self.position_job = self.after_idle(self._position_widget)
 
         self._configure_canvas_weather_icon(
             self.hero_icon_label,
@@ -3165,5 +3223,10 @@ class WeatherWidget(tk.Tk):
 
 
 if __name__ == "__main__":
-    app = WeatherWidget()
-    app.mainloop()
+    configure_error_logging()
+    try:
+        app = WeatherWidget()
+        app.mainloop()
+    except Exception:
+        LOGGER.exception("Application startup or main loop failed")
+        raise

@@ -73,6 +73,16 @@ class GitUpdateIntegrationTests(unittest.TestCase):
                 result = main._run_git_command(["check-ignore", "--quiet", ".venv/Scripts/pythonw.exe"])
             self.assertEqual(result.returncode, 0, "The supported virtualenv would block automatic updates")
 
+    def test_fallback_error_logs_do_not_block_source_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.init_repository(root)
+            shutil.copyfile(main.PROJECT_DIR / ".gitignore", root / ".gitignore")
+            with patch.object(main, "PROJECT_DIR", root):
+                for name in ("weather-report.log", "weather-report.log.1"):
+                    self.assertEqual(main._run_git_command(["check-ignore", "--quiet", name]).returncode, 0)
+                self.assertEqual(main._run_git_command(["check-ignore", "--quiet", "notes.txt"]).returncode, 1)
+
     def test_local_remote_update_restart_and_conflict_safety(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

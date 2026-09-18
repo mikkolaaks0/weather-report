@@ -442,6 +442,43 @@ class SettingsAndShortcutTests(unittest.TestCase):
             self.assertEqual(json.loads(settings_path.read_text(encoding="utf-8")), original)
             self.assertEqual(list(settings_path.parent.glob(".*.tmp")), [])
 
+    def test_settings_accept_utf8_bom_and_round_trip_international_text(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            with patch.object(main, "SETTINGS_PATH", path):
+                path.write_text(json.dumps({"city": "Jyv\u00e4skyl\u00e4"}), encoding="utf-8-sig")
+                settings = main.load_settings()
+                self.assertEqual(settings["city"], "Jyv\u00e4skyl\u00e4")
+                self.assertTrue(main.save_settings(settings))
+                self.assertEqual(main.load_settings(), settings)
+
+    def test_settings_size_limit_is_enforced_before_json_parsing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            with patch.object(main, "SETTINGS_PATH", path):
+                defaults = main.load_settings()
+                payload = b'{"city":"Espoo"}'
+                path.write_bytes(payload + b" " * (main.MAX_SETTINGS_BYTES - len(payload)))
+                self.assertEqual(main.load_settings()["city"], "Espoo")
+                path.write_bytes(path.read_bytes() + b" ")
+                with patch.object(main.json, "loads") as parse:
+                    self.assertEqual(main.load_settings(), defaults)
+                parse.assert_not_called()
+
+    def test_oversized_or_deep_settings_cannot_replace_the_working_file(self) -> None:
+        deep = {}
+        for _ in range(2000):
+            deep = {"nested": deep}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            with patch.object(main, "SETTINGS_PATH", path):
+                self.assertTrue(main.save_settings({"city": "Espoo"}))
+                original = path.read_bytes()
+                for invalid in ({"extra": "\u00e4" * main.MAX_SETTINGS_BYTES}, deep):
+                    self.assertFalse(main.save_settings(invalid))
+                    self.assertEqual(path.read_bytes(), original)
+                    self.assertEqual(list(path.parent.glob(".*.tmp")), [])
+
     def test_failed_settings_replacement_preserves_original_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             path = Path(temporary_dir) / "settings.json"
@@ -717,8 +754,13 @@ class TrayMenuTests(unittest.TestCase):
         tray.run_detached.side_effect = OSError("tray unavailable")
         fake_pystray = Mock()
         fake_pystray.Icon.return_value = tray
-        with patch.object(main, "pystray", fake_pystray), patch.object(main, "build_tray_symbol_icon", return_value=object()):
+        with (
+            patch.object(main, "pystray", fake_pystray),
+            patch.object(main, "build_tray_symbol_icon", return_value=object()),
+            self.assertLogs(main.LOGGER, level="ERROR") as logs,
+        ):
             widget._init_tray_icon()
+        self.assertIn("tray unavailable", logs.output[0])
         tray.stop.assert_called_once()
         self.assertIsNone(widget.tray_icon)
         widget.deiconify.assert_called_once()

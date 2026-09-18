@@ -73,6 +73,43 @@ class StartupOwnershipTests(unittest.TestCase):
                     main.repair_startup_shortcut()
                 enable.assert_not_called()
 
+    def test_correct_link_is_not_rewritten_but_stale_fields_are_repaired(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / main.STARTUP_SHORTCUT_NAME
+            path.touch()
+            target = str(Path(directory) / "WeatherReport.exe")
+            correct = {"Target": target, "Arguments": "", "WorkingDirectory": directory, "IconLocation": target + ",0"}
+            for changed in (None, "Target", "Arguments", "WorkingDirectory", "IconLocation"):
+                shortcut = dict(correct)
+                if changed:
+                    shortcut[changed] += "stale"
+                with (
+                    self.subTest(changed=changed),
+                    patch.object(main, "get_startup_shortcut_paths", return_value=[path]),
+                    patch.object(main, "get_startup_shortcut_path", return_value=path),
+                    patch.object(main, "_read_windows_shortcut", return_value=shortcut),
+                    patch.object(main, "_shortcut_belongs_to_current_installation", return_value=True),
+                    patch.object(main, "_resolve_shortcut_target", return_value=(target, "", directory, target)),
+                    patch.object(main, "set_startup_enabled") as enable,
+                ):
+                    main.repair_startup_shortcut()
+                self.assertEqual(enable.call_count, int(changed is not None))
+
+    def test_legacy_link_still_migrates_even_when_its_target_is_current(self):
+        with tempfile.TemporaryDirectory() as directory:
+            primary = Path(directory) / main.STARTUP_SHORTCUT_NAME
+            legacy = Path(directory) / main.LEGACY_STARTUP_SHORTCUT_NAMES[0]
+            legacy.touch()
+            with (
+                patch.object(main, "get_startup_shortcut_paths", return_value=[primary, legacy]),
+                patch.object(main, "get_startup_shortcut_path", return_value=primary),
+                patch.object(main, "_read_windows_shortcut", return_value={}),
+                patch.object(main, "_shortcut_belongs_to_current_installation", return_value=True),
+                patch.object(main, "set_startup_enabled") as enable,
+            ):
+                main.repair_startup_shortcut()
+            enable.assert_called_once_with(True)
+
     def test_shortcut_reader_rejects_malformed_output(self):
         for output in ("", "null", "[]", '{"Target": 5, "Arguments": ""}', '{"Target": "x"}'):
             with self.subTest(output=output), patch.object(main, "_run_shortcut_script", return_value=output):
@@ -92,4 +129,7 @@ class StartupOwnershipTests(unittest.TestCase):
             arguments = '"S\u00e4\u00e4 test\'s.py"'
             with patch.object(main, "_resolve_shortcut_target", return_value=(target, arguments, directory, target)):
                 main.create_windows_shortcut(path)
-            self.assertEqual(main._read_windows_shortcut(path), {"Target": target, "Arguments": arguments})
+            self.assertEqual(main._read_windows_shortcut(path), {
+                "Target": target, "Arguments": arguments,
+                "WorkingDirectory": directory, "IconLocation": target + ",0",
+            })

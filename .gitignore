@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 /.venv/
 weather_settings.json
+/weather-report.log
+/weather-report.log.1
 build/
 dist/
 release/

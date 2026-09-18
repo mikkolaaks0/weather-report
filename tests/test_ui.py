@@ -153,6 +153,28 @@ class TimerLifecycleTests(unittest.TestCase):
         self.assertGreaterEqual(width, widget.winfo_reqwidth())
         self.assertGreaterEqual(height, widget.winfo_reqheight())
 
+    def test_fallback_window_resizes_after_a_long_city_refresh(self) -> None:
+        widget = self.widget
+        widget._position_widget()
+        weather = {"current": {"weather_code": 3, "temperature_2m": 18}, "daily": {"time": ["2026-09-18"]}}
+        widget._apply_weather({"name": "A very long city name " * 3}, weather, "Espoo")
+        old_job = widget.position_job
+        self.assertIsNotNone(old_job)
+        widget._apply_weather({"name": "Another long city name " * 3}, weather, "Espoo")
+        self.assertNotIn(old_job, widget.tk.call("after", "info"))
+        with patch.object(widget, "geometry", wraps=widget.geometry) as geometry:
+            widget.update_idletasks()
+        width = int(geometry.call_args.args[0].split("x", 1)[0])
+        self.assertGreaterEqual(width, widget.winfo_reqwidth())
+        self.assertIsNone(widget.position_job)
+
+    def test_tray_mode_does_not_schedule_fallback_resizing(self) -> None:
+        widget = self.widget
+        widget._cancel_job("position_job")
+        widget.tray_icon = Mock()
+        widget._apply_current_weather_summary(main.resolve_weather_style(3), "18 C", "Espoo", "12:00")
+        self.assertIsNone(widget.position_job)
+
     def test_repeated_layout_reuses_fonts_and_keeps_canvas_geometry(self) -> None:
         widget = self.widget
         widget._layout_popup_content(584, 329)

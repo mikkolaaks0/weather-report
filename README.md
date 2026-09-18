@@ -150,6 +150,8 @@ not redirect another installation's startup link. Unreadable or unrecognized
 links are left untouched; explicitly enabling startup from the tray still selects
 the running copy. Shortcut inspection and creation preserve Unicode paths and
 run in the background with a bounded timeout.
+Already-correct startup links are left unchanged, avoiding an unnecessary second
+PowerShell process and disk write. Legacy links and stale link fields are still repaired.
 
 ## Build
 
@@ -292,9 +294,16 @@ User settings are stored under:
 If `APPDATA` is unavailable, the app uses `LOCALAPPDATA`. Invalid settings fields
 fall back to defaults, and an unreadable or malformed settings file does not
 prevent startup.
+UTF-8 settings with or without a BOM are accepted. Reads are capped at 64 KiB;
+oversized or excessively nested settings cannot replace a working settings file.
 Settings are saved atomically: a failed write keeps the previous file intact and
 shows one warning per failure episode. Unsaved changes remain active in the
 current session and are retried after a successful weather refresh and on exit.
+
+Unexpected startup, tray, UI callback, and weather-processing errors are recorded locally
+in `weather-report.log` beside the settings file, including in windowless runs.
+The log rotates at 512 KiB and keeps one backup; logging failure does not prevent
+startup. It is not uploaded, and normal weather refreshes are not logged.
 
 ## Updates
 
