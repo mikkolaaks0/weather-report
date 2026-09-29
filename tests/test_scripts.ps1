@@ -52,6 +52,44 @@ try {
             Assert-True ($script:stopped.Count -eq 1) "$scriptName stopped an unrelated process"
             Assert-True ([object]::ReferenceEquals($script:stopped[0], $matching)) 'Wrong process stopped'
 
+            foreach ($case in @(
+                @{ Name = 'already exited'; Exited = $true; Reject = $false; Stops = 0 },
+                @{ Name = 'exits during stop'; ExitDuringStop = $true; Reject = $false; Stops = 1 },
+                @{ Name = 'access denied'; StopError = $true; Reject = $true; Stops = 1 },
+                @{ Name = 'exit timeout'; Timeout = $true; Reject = $true; Stops = 1 }
+            )) {
+                & {
+                    $process = [pscustomobject]@{
+                        Path = $target; HasExited = [bool]$case.Exited; StopCount = 0
+                        WaitCount = 0; WaitResult = -not $case.Timeout
+                    }
+                    $process | Add-Member ScriptMethod WaitForExit {
+                        param($timeout)
+                        Assert-True ($timeout -eq 10000) 'Process exit wait is not bounded'
+                        $this.WaitCount += 1
+                        return $this.WaitResult
+                    }
+                    function Get-Process { param($Name, $ErrorAction) return @($process) }
+                    function Stop-Process {
+                        param($InputObject, [switch]$Force)
+                        $InputObject.StopCount += 1
+                        if ($case.ExitDuringStop) { $InputObject.HasExited = $true }
+                        if ($case.ExitDuringStop -or $case.StopError) { throw 'simulated process stop failure' }
+                    }
+                    $rejected = $false
+                    try { Stop-InstalledApplication -ExecutablePath $target }
+                    catch { $rejected = $true }
+                    Assert-True ($rejected -eq $case.Reject) "$scriptName mishandled process state: $($case.Name)"
+                    Assert-True ($process.StopCount -eq $case.Stops) 'Unexpected process termination attempt'
+                    if ($case.Exited -or $case.StopError) {
+                        Assert-True ($process.WaitCount -eq 0) 'Waited after a stop failure or an already exited process'
+                    }
+                    else {
+                        Assert-True ($process.WaitCount -eq 1) 'Did not confirm process termination'
+                    }
+                }
+            }
+
             Assert-SafeInstallDirectory (Split-Path -Parent $target)
             foreach ($unsafePath in @([System.IO.Path]::GetPathRoot($testDir), $env:USERPROFILE, $testDir)) {
                 $rejected = $false
@@ -249,6 +287,62 @@ try {
     }
 
     & {
+        . (Get-ScriptFunctions 'install.ps1')
+        $downloadDir = Join-Path $testDir 'checksums [literal]'
+        New-Item -ItemType Directory -Path $downloadDir | Out-Null
+        $assetName = 'WeatherReport-portable.zip'
+        $assetPath = Join-Path $downloadDir $assetName
+        [System.IO.File]::WriteAllText($assetPath, 'original package')
+        $hash = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash
+        $release = @{ assets = @(@{ name = 'SHA256SUMS.txt'; browser_download_url = 'https://example.invalid/checksums' }) }
+        $downloads = New-Object 'System.Collections.Generic.List[string]'
+        function Invoke-Download {
+            param($Uri, $OutFile)
+            $downloads.Add($Uri)
+            [System.IO.File]::WriteAllText($OutFile, $manifest)
+        }
+        $manifest = "$hash  $assetName`n"
+        Test-AssetChecksum -Release $release -AssetName $assetName -AssetPath $assetPath
+        Assert-True ($downloads.Count -eq 1) 'The published checksum was not fetched'
+        foreach ($invalidManifest in @("$hash  other.zip`n", "invalid  $assetName`n", "$hash  $assetName`n")) {
+            $manifest = $invalidManifest
+            [System.IO.File]::WriteAllText($assetPath, 'corrupted package')
+            $rejected = $false
+            try { Test-AssetChecksum -Release $release -AssetName $assetName -AssetPath $assetPath }
+            catch { $rejected = $true }
+            Assert-True $rejected 'Missing, malformed or mismatching package checksum was accepted'
+        }
+        $downloads.Clear()
+        Test-AssetChecksum -Release @{ assets = @() } -AssetName $assetName -AssetPath $assetPath
+        Assert-True ($downloads.Count -eq 0) 'Legacy releases without a checksum attempted a download'
+    }
+
+    & {
+        $distDir = Join-Path $testDir 'build [literal]'
+        $internal = Join-Path $distDir '_internal'
+        New-Item -ItemType Directory -Path $internal -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $distDir 'WeatherReport.exe'), 'test exe')
+        [System.IO.File]::WriteAllText((Join-Path $internal 'app_metadata.json'), 'test metadata')
+        $zipPath = Join-Path $testDir 'WeatherReport-portable [literal].zip'
+        $extractDir = Join-Path $testDir 'expanded [literal]'
+        foreach ($item in @(
+            @{ Script = 'build_release.ps1'; Command = 'Compress-Archive' },
+            @{ Script = 'install.ps1'; Command = 'Expand-Archive' }
+        )) {
+            # Run the actual archive commands only, never the build/install entrypoints.
+            $command = (Get-ScriptAst $item.Script).Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -eq $item.Command
+            }, $true)
+            Assert-True ($null -ne $command) "Archive command not found: $($item.Script)"
+            & ([scriptblock]::Create($command.Extent.Text))
+        }
+        Assert-True ([System.IO.File]::ReadAllText((Join-Path $extractDir 'WeatherReport.exe')) -eq 'test exe') 'Package root layout changed'
+        Assert-True ([System.IO.File]::ReadAllText((Join-Path $extractDir '_internal\app_metadata.json')) -eq 'test metadata') 'Nested package content changed'
+    }
+
+    & {
         . (Get-ScriptFunctions 'publish_release.ps1')
         $state = @{ Dirty = $false; Commit = 'built-commit'; Branch = 'main' }
         function Get-RequiredCommandOutput {
@@ -297,6 +391,64 @@ try {
             Assert-True $rejected 'Publishing ignored untracked files hidden by Git configuration'
         }
         finally { Pop-Location }
+    }
+    & {
+        . (Get-ScriptFunctions '.github/scripts/publish-release.ps1')
+        $artifacts = @((Join-Path $testDir 'app.zip'), (Join-Path $testDir 'SHA256SUMS.txt'))
+        foreach ($artifact in $artifacts) { [System.IO.File]::WriteAllText($artifact, 'test artifact') }
+        $draftJson = '{"tagName":"v1.2.3","isDraft":true}'
+        foreach ($case in @(
+            @{ Name = 'new'; Json = ''; Fail = 'view'; Calls = 'view,create,upload,edit'; Reject = $false },
+            @{ Name = 'retry draft'; Json = $draftJson; Calls = 'view,upload,edit'; Reject = $false },
+            @{ Name = 'published'; Json = '{"tagName":"v1.2.3","isDraft":false}'; Calls = 'view'; Reject = $true },
+            @{ Name = 'wrong tag'; Json = '{"tagName":"v1.2.4","isDraft":true}'; Calls = 'view'; Reject = $true },
+            @{ Name = 'invalid state'; Json = '{"tagName":"v1.2.3","isDraft":"false"}'; Calls = 'view'; Reject = $true },
+            @{ Name = 'invalid JSON'; Json = 'invalid'; Calls = 'view'; Reject = $true },
+            @{ Name = 'create failure'; Json = ''; Fail = @('view', 'create'); Calls = 'view,create'; Reject = $true },
+            @{ Name = 'upload failure'; Json = $draftJson; Fail = 'upload'; Calls = 'view,upload'; Reject = $true },
+            @{ Name = 'publish failure'; Json = $draftJson; Fail = 'edit'; Calls = 'view,upload,edit'; Reject = $true }
+        )) {
+            $calls = New-Object 'System.Collections.Generic.List[string]'
+            function gh {
+                Assert-True ($args[0] -eq 'release' -and $args[2] -ceq 'v1.2.3') 'Unexpected release command'
+                $command = $args[1]
+                $calls.Add($command)
+                $global:LASTEXITCODE = if (@($case.Fail) -contains $command) { 1 } else { 0 }
+                switch ($command) {
+                    'view' { return $case.Json }
+                    'create' {
+                        Assert-True ($args -contains '--draft' -and $args -contains '--verify-tag') 'Release was not created as a verified draft'
+                    }
+                    'upload' {
+                        Assert-True ($args -contains '--clobber') 'Draft retry cannot replace incomplete assets'
+                        foreach ($artifact in $artifacts) {
+                            Assert-True ($args -contains $artifact) 'Release upload omitted an artifact'
+                        }
+                    }
+                    'edit' {
+                        Assert-True ($args -contains '--draft=false' -and $args -contains '--latest') 'Release was not published as latest'
+                    }
+                    default { throw "Unexpected release command: $command" }
+                }
+            }
+            $rejected = $false
+            try { Publish-ReleaseAssets -Tag 'v1.2.3' -Artifacts $artifacts }
+            catch { $rejected = $true }
+            Assert-True ($rejected -eq $case.Reject) "Wrong release result: $($case.Name)"
+            Assert-True (($calls -join ',') -ceq $case.Calls) "Unsafe release command sequence: $($case.Name): $calls"
+        }
+        $calls.Clear()
+        foreach ($invalid in @(
+            @{ Tag = 'bad'; Artifacts = $artifacts },
+            @{ Tag = 'v1.2.3'; Artifacts = @() },
+            @{ Tag = 'v1.2.3'; Artifacts = @((Join-Path $testDir 'missing.zip')) }
+        )) {
+            $rejected = $false
+            try { Publish-ReleaseAssets @invalid }
+            catch { $rejected = $true }
+            Assert-True $rejected 'Publishing accepted invalid tag or missing artifacts'
+        }
+        Assert-True ($calls.Count -eq 0) 'Invalid input reached GitHub'
     }
     Write-Output 'Installer and release safety checks passed.'
 }

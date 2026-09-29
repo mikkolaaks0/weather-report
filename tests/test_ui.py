@@ -145,6 +145,54 @@ class TimerLifecycleTests(unittest.TestCase):
         widget.destroy()
         self.assertFalse(pending.intersection(widget.tk.call("after", "info")))
 
+    def test_hidden_popup_does_not_schedule_clock_updates(self) -> None:
+        widget = self.widget
+        self.assertIsNone(widget.clock_job)
+        with patch.object(widget.clock_var, "set") as update_clock:
+            widget._tick_clock()
+        update_clock.assert_not_called()
+        self.assertIsNone(widget.clock_job)
+
+    def test_clock_refreshes_immediately_on_open_and_stops_on_hide(self) -> None:
+        widget = self.widget
+        first = main.datetime(2026, 9, 26, 12, 0)
+        second = first + main.timedelta(hours=2)
+        # Exercise the real clock and toggle flow without showing a desktop window.
+        with (
+            patch.object(widget.popup, "deiconify"),
+            patch.object(widget.popup, "lift"),
+            patch.object(widget.popup, "winfo_viewable", return_value=False),
+            patch.object(widget.popup, "state", return_value="normal"),
+            patch.object(widget, "_position_popup"),
+            patch.object(widget, "_ensure_fresh_weather") as refresh,
+            patch.object(main, "datetime", wraps=main.datetime) as clock,
+        ):
+            for now in (first, second):
+                clock.now.return_value = now
+                widget.toggle_popup()
+                self.assertEqual(widget.clock_var.get(), main.format_clock_fi(now))
+                self.assertEqual(widget.popup_bg_canvas.itemcget(widget.clock_label, "text"), main.format_clock_fi(now))
+                job = widget.clock_job
+                self.assertIn(job, widget.tk.call("after", "info"))
+                widget._hide_popup()
+                self.assertIsNone(widget.clock_job)
+                self.assertNotIn(job, widget.tk.call("after", "info"))
+            self.assertEqual(refresh.call_count, 2)
+
+    def test_repeated_clock_start_keeps_only_one_timer_and_destroy_cancels_it(self) -> None:
+        widget = self.widget
+        with patch.object(widget.popup, "state", return_value="normal"):
+            widget._tick_clock()
+            old_job = widget.clock_job
+            widget._tick_clock()
+            self.assertNotIn(old_job, widget.tk.call("after", "info"))
+            current_job = widget.clock_job
+            self.assertIn(current_job, widget.tk.call("after", "info"))
+            widget.destroy()
+            self.assertNotIn(current_job, widget.tk.call("after", "info"))
+            widget._tick_clock()
+            self.assertIsNone(widget.clock_job)
+
     def test_fallback_widget_fits_its_weather_and_controls(self) -> None:
         widget = self.widget
         with patch.object(widget, "geometry", wraps=widget.geometry) as geometry:

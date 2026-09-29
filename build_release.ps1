@@ -95,7 +95,7 @@ $requiredBuildPaths = @(
     (Join-Path $distDir '_internal\assets\fonts\Exo2-Regular.ttf')
 )
 foreach ($requiredPath in $requiredBuildPaths) {
-    if (-not (Test-Path $requiredPath)) {
+    if (-not (Test-Path -LiteralPath $requiredPath)) {
         throw "Portable build is missing a required file: $requiredPath"
     }
 }
@@ -104,13 +104,13 @@ New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 
 $zipPath = Join-Path $releaseDir 'WeatherReport-portable.zip'
 $installerPath = Join-Path $releaseDir 'WeatherReport-Setup.exe'
-if (Test-Path $zipPath) {
-    Remove-Item $zipPath -Force
+if (Test-Path -LiteralPath $zipPath) {
+    Remove-Item -LiteralPath $zipPath -Force
 }
-if (Test-Path $installerPath) {
-    Remove-Item $installerPath -Force
+if (Test-Path -LiteralPath $installerPath) {
+    Remove-Item -LiteralPath $installerPath -Force
 }
-Compress-Archive -Path (Join-Path $distDir '*') -DestinationPath $zipPath
+Compress-Archive -LiteralPath @(Get-ChildItem -LiteralPath $distDir | Select-Object -ExpandProperty FullName) -DestinationPath $zipPath
 Write-Host "Portable package ready: $zipPath"
 $releaseArtifacts = @($zipPath)
 
@@ -121,7 +121,7 @@ if (-not $SkipInstaller -and $iscc) {
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup build failed with exit code $LASTEXITCODE."
     }
-    if (-not (Test-Path $installerPath)) {
+    if (-not (Test-Path -LiteralPath $installerPath)) {
         throw "Installer build completed without the expected artifact: $installerPath"
     }
     $releaseArtifacts += $installerPath
@@ -134,9 +134,9 @@ $checksumPath = Join-Path $releaseDir 'SHA256SUMS.txt'
 $releaseArtifacts |
     Sort-Object { Split-Path -Leaf $_ } |
     ForEach-Object {
-        $hash = Get-FileHash -Algorithm SHA256 -Path $_
+        $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $_
         "$($hash.Hash.ToLowerInvariant())  $(Split-Path -Leaf $_)"
     } |
-    Set-Content -Path $checksumPath -Encoding ascii
+    Set-Content -LiteralPath $checksumPath -Encoding ascii
 
 Write-Host "Checksums ready: $checksumPath"

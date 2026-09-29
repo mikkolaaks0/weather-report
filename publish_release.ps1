@@ -150,10 +150,10 @@ Invoke-RequiredCommand -Command 'powershell' -Arguments $buildArgs
 $portableZip = Join-Path $root 'release\WeatherReport-portable.zip'
 $installer = Join-Path $root 'release\WeatherReport-Setup.exe'
 $checksums = Join-Path $root 'release\SHA256SUMS.txt'
-if (-not (Test-Path $portableZip)) {
+if (-not (Test-Path -LiteralPath $portableZip)) {
     throw "Release artifact was not found: $portableZip"
 }
-if (-not (Test-Path $checksums)) {
+if (-not (Test-Path -LiteralPath $checksums)) {
     throw "Release checksum file was not found: $checksums"
 }
 
@@ -171,7 +171,7 @@ $releaseArgs = @(
     'release', 'create', $Version,
     $portableZip
 )
-if (Test-Path $installer) {
+if (Test-Path -LiteralPath $installer) {
     $releaseArgs += $installer
 }
 $releaseArgs += @(

@@ -93,7 +93,13 @@ function Stop-InstalledApplication {
     foreach ($process in @(Get-Process -Name 'WeatherReport' -ErrorAction SilentlyContinue)) {
         if ($process.Path -and (Normalize-PathForSafety $process.Path) -eq $target) {
             if (-not $process.HasExited) {
-                Stop-Process -InputObject $process -Force
+                try {
+                    Stop-Process -InputObject $process -Force
+                }
+                catch {
+                    # The app may exit between enumeration and Stop-Process.
+                    if (-not $process.HasExited) { throw }
+                }
                 if (-not $process.WaitForExit(10000)) {
                     throw "The installed application did not exit: $target"
                 }
@@ -256,7 +262,7 @@ function Test-AssetChecksum {
     $checksumPath = Join-Path $downloadDir 'SHA256SUMS.txt'
     Invoke-Download -Uri $checksumAsset.browser_download_url -OutFile $checksumPath
 
-    $expectedLine = Get-Content $checksumPath |
+    $expectedLine = Get-Content -LiteralPath $checksumPath |
         Where-Object { $_ -match "\s+$([regex]::Escape($AssetName))$" } |
         Select-Object -First 1
 
@@ -265,7 +271,7 @@ function Test-AssetChecksum {
     }
 
     $expectedHash = ($expectedLine -split '\s+')[0].ToLowerInvariant()
-    $actualHash = (Get-FileHash -Algorithm SHA256 -Path $AssetPath).Hash.ToLowerInvariant()
+    $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $AssetPath).Hash.ToLowerInvariant()
     if ($actualHash -ne $expectedHash) {
         throw "Checksum verification failed for $AssetName."
     }
@@ -289,7 +295,7 @@ Test-AssetChecksum -Release $release -AssetName $asset.name -AssetPath $zipPath
 
 $extractDir = Join-Path $downloadDir 'extracted'
 Write-Host 'Validating package contents...'
-Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
 $stagedExePath = Get-ChildItem -LiteralPath $extractDir -Filter $exeName -File -Recurse |
     Select-Object -First 1 -ExpandProperty FullName
 if (-not $stagedExePath) {

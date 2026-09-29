@@ -1270,6 +1270,8 @@ def _run_shortcut_script(script: str) -> str:
     if not shell_path:
         raise OSError("PowerShelliä ei löytynyt pikakuvakkeen käsittelyyn.")
 
+    # Let the chosen PowerShell edition discover its own built-in modules.
+    environment = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
     try:
         result = subprocess.run(
             [shell_path, "-NoProfile", "-NonInteractive", "-Sta", "-Command", script],
@@ -1278,6 +1280,7 @@ def _run_shortcut_script(script: str) -> str:
             encoding="utf-8",
             errors="replace",
             timeout=20,
+            env=environment,
             **_hidden_subprocess_kwargs(),
         )
     except subprocess.CalledProcessError as error:
@@ -1604,7 +1607,6 @@ class WeatherWidget(tk.Tk):
         self.bind("<Escape>", self._handle_escape)
         self.position_job = self.after(200, self._position_widget)
         self.ui_poll_job = self.after(50, self._drain_ui_callbacks)
-        self.clock_job = self.after(300, self._tick_clock)
         self.bootstrap_job = self.after(700, self.refresh_weather)
         if not IS_FROZEN:
             self.update_job = self.after(UPDATE_CHECK_DELAY_MS, self.check_for_app_update)
@@ -2761,6 +2763,9 @@ class WeatherWidget(tk.Tk):
         self._apply_popup_round_corners(POPUP_CORNER_RADIUS)
 
     def _tick_clock(self) -> None:
+        self._cancel_job("clock_job")
+        if self._is_destroying or not self.popup or self.popup.state() != "normal":
+            return
         self.clock_var.set(format_clock_fi(datetime.now()))
         if hasattr(self, "popup_bg_canvas") and hasattr(self, "clock_label"):
             self.popup_bg_canvas.itemconfigure(self.clock_label, text=self.clock_var.get())
@@ -2776,10 +2781,12 @@ class WeatherWidget(tk.Tk):
 
         self._ensure_fresh_weather()
         self.popup.deiconify()
+        self._tick_clock()
         self.popup.lift()
         self._position_popup()
 
     def _hide_popup(self) -> None:
+        self._cancel_job("clock_job")
         if self.popup:
             self.city_search.hide()
             self.popup.withdraw()

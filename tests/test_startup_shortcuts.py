@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -120,6 +121,27 @@ class StartupOwnershipTests(unittest.TestCase):
         with patch.object(main.shutil, "which", return_value="powershell"), patch.object(main.subprocess, "run", side_effect=subprocess.TimeoutExpired("powershell", 20)):
             with self.assertRaisesRegex(OSError, "aikakatkaistiin"):
                 main._run_shortcut_script("")
+
+    def test_shortcut_worker_uses_edition_default_modules_without_changing_parent(self):
+        inherited = {"PSModulePath": "foreign PowerShell modules", "WEATHER_TEST_MARKER": "preserved"}
+        result = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
+        with (
+            patch.dict(os.environ, inherited),
+            patch.object(main.shutil, "which", return_value="powershell"),
+            patch.object(main.subprocess, "run", return_value=result) as run,
+        ):
+            self.assertEqual(main._run_shortcut_script("test"), "ok")
+            child_env = run.call_args.kwargs["env"]
+            self.assertFalse(any(key.upper() == "PSMODULEPATH" for key in child_env))
+            self.assertEqual(child_env["WEATHER_TEST_MARKER"], "preserved")
+            self.assertEqual(os.environ["PSModulePath"], inherited["PSModulePath"])
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("pwsh"), "Both PowerShell editions required")
+    def test_windows_powershell_commands_work_when_launched_from_powershell_seven(self):
+        modules = str(Path(shutil.which("pwsh")).parent / "Modules")
+        with patch.dict(os.environ, {"PSModulePath": modules}):
+            output = main._run_shortcut_script("$ErrorActionPreference = 'Stop'; (Get-Command Get-FileHash).Name")
+        self.assertEqual(output.strip(), "Get-FileHash")
 
     @unittest.skipUnless(os.name == "nt", "Windows shortcut integration")
     def test_real_shortcut_reader_preserves_unicode_and_apostrophes(self):

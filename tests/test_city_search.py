@@ -150,6 +150,129 @@ class AutocompleteTests(unittest.TestCase):
         self.finish_request()
         self.search.assert_called_once_with("Hel")
 
+    def test_repeated_query_uses_cached_suggestions_and_keeps_keyboard_selection(self):
+        self.results_for()
+        self.control.dismiss()
+        self.variable.set("  Hel  ")
+        self.control._request()
+        self.assertEqual(self.workers, [])
+        self.search.assert_called_once_with("Hel")
+        self.assertIsNone(self.control.debounce_job)
+        self.assertFalse(self.control.inflight)
+        self.assertFalse(self.control.ready)
+        self.assertTrue(self.control.complete)
+        self.control._move(1)
+        self.control.confirm()
+        self.submit.assert_called_once_with("Helsingborg", place("Helsingborg"))
+
+    def test_enter_can_confirm_a_cached_query_without_starting_a_worker(self):
+        self.results_for()
+        self.variable.set("Hel")
+        self.control.confirm()
+        self.assertEqual(self.workers, [])
+        self.submit.assert_called_once_with("Helsinki", place())
+        self.assertFalse(self.control.confirm_pending)
+        self.assertFalse(self.control.editing)
+        self.assertFalse(self.control.winfo_manager())
+
+    def test_cache_expires_from_network_response_not_last_use(self):
+        with patch("city_search.monotonic", return_value=100) as now:
+            self.results_for()
+            now.return_value = 100 + self.control.CACHE_TTL_SECONDS - 1
+            self.variable.set("Hel")
+            self.control._request()
+            self.assertEqual(self.workers, [])
+            now.return_value += 1
+            self.variable.set("Hel")
+            self.control._request()
+            self.assertEqual(len(self.workers), 1)
+            self.finish_request()
+        self.assertEqual(self.search.call_count, 2)
+
+    def test_cache_evicts_least_recently_used_query(self):
+        with patch.object(self.control, "CACHE_LIMIT", 2):
+            self.results_for("Hel")
+            self.results_for("Esp")
+            self.variable.set("Hel")
+            self.control._request()
+            self.results_for("Tam")
+            self.assertEqual(list(self.control._query_cache), ["Hel", "Tam"])
+            self.results_for("Esp")
+            self.assertEqual(len(self.control._query_cache), 2)
+        self.assertEqual([call.args[0] for call in self.search.call_args_list], ["Hel", "Esp", "Tam", "Esp"])
+
+    def test_empty_and_failed_queries_are_not_cached(self):
+        for error in (False, True):
+            with self.subTest(error=error):
+                self.search.side_effect = OSError("offline") if error else None
+                self.search.return_value = []
+                self.results_for("Unknown")
+                self.assertFalse(self.control._query_cache)
+                self.search.side_effect = None
+                self.search.return_value = [place()]
+                self.results_for("Unknown")
+                self.assertEqual(self.control.rows, [place()])
+                self.control._query_cache.clear()
+
+    def test_cached_rows_are_independent_of_displayed_and_service_results(self):
+        self.results_for()
+        self.search.return_value[0]["name"] = "Modified"
+        self.control.rows[1]["name"] = "Modified"
+        for _ in range(2):
+            self.variable.set("Hel")
+            self.control._request()
+            self.assertEqual(self.control.rows, [place(), place("Helsingborg")])
+            self.control.rows[0]["name"] = "Modified again"
+        self.search.assert_called_once_with("Hel")
+
+    def test_cached_confirmation_still_wins_over_an_inflight_different_query(self):
+        self.results_for("Hel")
+        self.variable.set("Esp")
+        self.control._request()
+        self.variable.set("Hel")
+        self.control.confirm()
+        self.assertEqual(len(self.workers), 1)
+        self.search.return_value = [place("Espoo")]
+        self.finish_request()
+        self.assertEqual(self.workers, [])
+        self.submit.assert_called_once_with("Helsinki", place())
+        self.assertNotIn("Esp", self.control._query_cache)
+        self.assertFalse(self.control.inflight)
+
+    def test_unchanged_layout_preserves_rows_selection_and_scroll_position(self):
+        self.results_for()
+        self.control._select(1)
+        self.control.listbox.xview_moveto(0.25)
+        scroll = self.control.listbox.xview()
+        with (
+            patch.object(self.control.listbox, "delete", wraps=self.control.listbox.delete) as delete,
+            patch.object(self.control.listbox, "insert", wraps=self.control.listbox.insert) as insert,
+            patch.object(self.control, "_select", wraps=self.control._select) as select,
+        ):
+            for _ in range(5):
+                self.control.reposition()
+            delete.assert_not_called()
+            insert.assert_not_called()
+            select.assert_not_called()
+        self.assertEqual(self.control.listbox.curselection(), (1,))
+        self.assertEqual(self.control.listbox.index("active"), 1)
+        self.assertEqual(self.control.listbox.xview(), scroll)
+
+    def test_resizing_rebuilds_labels_only_when_needed_and_preserves_selection(self):
+        self.results_for()
+        self.control._select(1)
+        with patch.object(self.canvas, "winfo_width", return_value=400):
+            self.control.reposition()
+            full_labels = self.control.listbox.get(0, "end")
+            self.assertEqual(full_labels[0], "Helsinki, Uusimaa, Suomi")
+        with patch.object(self.canvas, "winfo_width", return_value=100):
+            self.control.reposition()
+        self.assertNotEqual(self.control.listbox.get(0, "end"), full_labels)
+        self.assertTrue(all(label.endswith("...") for label in self.control.listbox.get(0, "end")))
+        self.assertEqual(self.control.listbox.curselection(), (1,))
+        self.control.confirm()
+        self.submit.assert_called_once_with("Helsingborg", place("Helsingborg"))
+
     def test_edit_state_is_kept_until_confirmation_finishes(self):
         self.assertFalse(self.control.editing)
         self.variable.set("Hel")
@@ -212,7 +335,7 @@ class AutocompleteTests(unittest.TestCase):
     def test_confirmed_search_survives_hiding_and_never_steals_focus_on_completion(self):
         for action in ("hide", "focus_out", "outside_click"):
             with self.subTest(action=action):
-                self.variable.set("Hel")
+                self.variable.set("Hel " + action)
                 self.control.confirm()
                 with patch.object(self.control, "focus_get", return_value=None), patch.object(self.canvas, "focus_set") as focus:
                     if action == "hide":

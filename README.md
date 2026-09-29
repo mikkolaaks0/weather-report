@@ -15,6 +15,7 @@ from the system tray.
 - Enter or Hae confirms the top suggestion; arrow keys choose another match
 - The latest submitted city search takes precedence, including its exact location
 - Background refreshes preserve the city being edited and the highlighted suggestion
+- Repeated location suggestions use a bounded, five-minute in-memory cache
 - Temperature, daily high/low, precipitation, humidity, wind, sunrise and sunset
 - Near-term precipitation probability based on the next 6 hours
 - Hourly rain probabilities follow Open-Meteo's preceding-hour timestamps,
@@ -64,7 +65,10 @@ Useful flags are `-Startup`, `-NoDesktopShortcut`, `-NoStartMenuShortcut`, and
 drive-root paths before replacing an existing install. On updates, an existing
 startup shortcut is preserved and rewritten to the current executable path.
 Downloads have time limits, and the installer stops only the executable inside
-the installation being replaced. The old startup shortcut is removed only after
+the installation being replaced. An app that exits during that stop is treated
+as already stopped; real termination failures still abort the operation.
+Package extraction and checksum checks support literal Windows paths, including
+directory names containing square brackets. The old startup shortcut is removed only after
 the replacement has been saved successfully.
 Core Python/Tk runtime files are checked before stopping the current app. If an
 installation step fails after replacement, recovery restores the previous app
@@ -102,6 +106,11 @@ and removes keyboard focus from the city field. Escape dismisses suggestions;
 another Escape hides the popup. If suggestions are unavailable, confirmation
 falls back to the regular name search. Selected coordinates are remembered across
 refreshes and restarts, so same-named cities do not silently change location.
+Up to 32 successful suggestion queries are cached in memory for five minutes
+from their response, reducing repeated requests while editing. Empty or failed
+lookups are not cached, and the cache is not written to disk. Moving the dropdown
+without changing its labels preserves its rows and selection without rebuilding it.
+The popup clock runs only while the card is open and updates immediately on reopening.
 After confirmation, switching windows or hiding the popup does not cancel the
 search or let its completion steal keyboard focus. Escape or editing the query
 still cancels a pending suggestion selection. If a confirmed location's weather
@@ -150,6 +159,9 @@ not redirect another installation's startup link. Unreadable or unrecognized
 links are left untouched; explicitly enabling startup from the tray still selects
 the running copy. Shortcut inspection and creation preserve Unicode paths and
 run in the background with a bounded timeout.
+PowerShell helpers discover their own edition's modules instead of inheriting a
+potentially incompatible module path from the launching shell. This changes only
+the helper process environment, not the user's PowerShell configuration.
 Already-correct startup links are left unchanged, avoiding an unnecessary second
 PowerShell process and disk write. Legacy links and stale link fields are still repaired.
 
@@ -171,6 +183,8 @@ Release artifacts are written to `release/`. `SHA256SUMS.txt` contains only the
 artifacts produced by the current build, so unrelated files in `release/` cannot
 leak into the published checksum manifest. The build stops before packaging if
 the test suite fails.
+Archive creation preserves the package's root layout even when the build directory
+contains spaces or square brackets.
 
 `app_metadata.json` is the single source for the app version and release date.
 Without `-Version`, the build uses its version; an explicit version must match.
@@ -193,7 +207,8 @@ Coverage includes:
 - Weather payloads, bounded network retries, closed HTTP error responses,
   local-date alignment, precipitation windows, and all mapped WMO codes.
 - Autocomplete selection, Enter/Escape bindings, focus changes, superseded
-  responses, exact-location persistence, and retry targets after failures.
+  responses, bounded cache expiry/eviction, exact-location persistence, and retry
+  targets after failures.
 - Hidden Tk rendering, icon dimensions and transparency, tray failures and
   tooltip limits, background-worker failures, and timer replacement/cleanup.
 - Atomic settings and shortcut writes, redirected Windows folders, installer
@@ -206,12 +221,16 @@ Coverage includes:
   background update checks, and closing or receiving weather during error dialogs.
 - Startup-link ownership across installations, Unicode shortcut inspection,
   location-midnight refreshes, and closing during update/restart confirmations.
+- Popup clock start/stop, unchanged dropdown layout, release draft retries, and
+  protection against replacing published release assets.
 
 Windows tests render a hidden popup and inspect temporary `.lnk` files. Git tests
 use local repositories without contacting GitHub. Installer and launcher tests
 use temporary directories, shortcut snapshots, and an isolated virtualenv with a
 short non-UI test program. They do not install the app, launch the user's weather
 app, or modify the user's startup settings.
+The PowerShell test subprocess uses a clean Git context and its own default module
+path. Foreign Git overrides are injected explicitly by their dedicated tests.
 
 ## Bundled Assets
 
@@ -244,6 +263,9 @@ standalone tag run. It verifies that the tag matches the app
 metadata and belongs to `main`, and builds the package on Windows. It uploads the ZIP
 and `SHA256SUMS.txt` to a draft release before publishing it as the latest
 release. A failed build or upload does not replace the latest published version.
+Rerunning a failed workflow can reuse the tag's existing draft and replace its
+ZIP and checksum before publishing. Already-published releases are not modified;
+changes to them require a new version tag.
 
 For local publishing, including optional Inno Setup installers, install GitHub
 CLI once and sign in:

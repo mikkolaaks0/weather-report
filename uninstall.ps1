@@ -69,7 +69,13 @@ function Stop-InstalledApplication {
     foreach ($process in @(Get-Process -Name 'WeatherReport' -ErrorAction SilentlyContinue)) {
         if ($process.Path -and (Normalize-PathForSafety $process.Path) -eq $target) {
             if (-not $process.HasExited) {
-                Stop-Process -InputObject $process -Force
+                try {
+                    Stop-Process -InputObject $process -Force
+                }
+                catch {
+                    # The app may exit between enumeration and Stop-Process.
+                    if (-not $process.HasExited) { throw }
+                }
                 if (-not $process.WaitForExit(10000)) {
                     throw "The installed application did not exit: $target"
                 }

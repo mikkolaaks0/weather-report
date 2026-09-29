@@ -1,6 +1,8 @@
 """Non-blocking location suggestions for the existing Tk city field."""
 
 import tkinter as tk
+from collections import OrderedDict
+from time import monotonic
 from tkinter import font as tkfont
 from typing import Callable
 
@@ -8,6 +10,8 @@ from typing import Callable
 class CitySearch(tk.Frame):
     LIMIT = 5
     DEBOUNCE_MS = 300
+    CACHE_LIMIT = 32
+    CACHE_TTL_SECONDS = 5 * 60
 
     def __init__(
         self, parent, entry, variable, search_button, *, search: Callable,
@@ -36,6 +40,7 @@ class CitySearch(tk.Frame):
         self.focus_job = None
         self.closed = False
         self._setting_text = False
+        self._query_cache: OrderedDict[str, tuple[float, list[dict]]] = OrderedDict()
         self.listbox = tk.Listbox(
             self, font=font, bg=background, fg="#EAF0FF",
             selectbackground="#2B677E", selectforeground="#FFFFFF",
@@ -113,6 +118,14 @@ class CitySearch(tk.Frame):
         self.ready = True
         if self.inflight or self.closed:
             return
+        cached = self._query_cache.get(self.query)
+        if cached is not None:
+            expires_at, rows = cached
+            if monotonic() < expires_at:
+                self._query_cache.move_to_end(self.query)
+                self._present_results([dict(place) for place in rows], False)
+                return
+            del self._query_cache[self.query]
         self.inflight = True
         generation, query = self.generation, self.query
 
@@ -136,6 +149,18 @@ class CitySearch(tk.Frame):
             if self.ready:
                 self._request()
             return
+        # Cache only successful, current suggestions, never a transient outage.
+        if rows and not error:
+            self._query_cache[self.query] = (
+                monotonic() + self.CACHE_TTL_SECONDS,
+                [dict(place) for place in rows[:self.LIMIT]],
+            )
+            self._query_cache.move_to_end(self.query)
+            if len(self._query_cache) > self.CACHE_LIMIT:
+                self._query_cache.popitem(last=False)
+        self._present_results(rows, error)
+
+    def _present_results(self, rows: list[dict], error: bool) -> None:
         self.ready = False
         self.complete = True
         self.rows = rows[:self.LIMIT]
@@ -208,15 +233,20 @@ class CitySearch(tk.Frame):
         y = self.entry.winfo_rooty() - parent.winfo_rooty() + self.entry.winfo_height() + 3
         self.place(x=x, y=y, width=width)
         self.lift()
-        selection = self.listbox.curselection()
-        self.listbox.delete(0, "end")
+        labels = []
         for place in self.rows:
             label = self._label(place)
             if self.row_font.measure(label) > width - 18:
                 while label and self.row_font.measure(label + "...") > width - 18:
                     label = label[:-1]
                 label += "..."
-            self.listbox.insert("end", label)
+            labels.append(label)
+        if tuple(labels) == self.listbox.get(0, "end"):
+            return
+        selection = self.listbox.curselection()
+        self.listbox.delete(0, "end")
+        if labels:
+            self.listbox.insert("end", *labels)
         if self.rows:
             self._select(min(selection[0] if selection else 0, len(self.rows) - 1))
 
