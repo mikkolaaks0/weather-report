@@ -90,20 +90,16 @@ def _runtime_file_signature() -> tuple[tuple[str, str], ...] | None:
     if IS_FROZEN:
         return None
 
-    roots = [
-        PROJECT_DIR / "main.py",
-        PROJECT_DIR / "city_search.py",
-        PROJECT_DIR / "app_metadata.json",
-        PROJECT_DIR / "start_weather_app.bat",
-        PROJECT_DIR / "start_weather_app.vbs",
-        PROJECT_DIR / "assets",
+    files = [
+        PROJECT_DIR / name for name in (
+            "main.py", "city_search.py", "app_metadata.json",
+            "start_weather_app.bat", "start_weather_app.vbs",
+            "assets/app.ico", "assets/logo.png",
+        )
     ]
-    files: list[Path] = []
-    for root in roots:
-        if root.is_file():
-            files.append(root)
-        elif root.is_dir():
-            files.extend(path for path in root.rglob("*") if path.is_file())
+    # Editing sources and documentation do not change the running UI.
+    for pattern in ("assets/weather-icons/*.png", "assets/metric-icons/*.png", "assets/fonts/*.ttf"):
+        files.extend(PROJECT_DIR.glob(pattern))
 
     signature: list[tuple[str, str]] = []
     for path in files:
@@ -350,62 +346,12 @@ class WeatherStyle:
     accent: str
 
 
-WEATHER_ICON_ALIASES = {
-    "sun": "sun",
-    "clear": "sun",
-    "day": "sun",
-    "☀": "sun",
-    "☀️": "sun",
-    "moon": "moon",
-    "night": "moon",
-    "☾": "moon",
-    "☽": "moon",
-    "🌙": "moon",
-    "partly_cloudy": "partly-cloudy",
-    "partly-cloudy": "partly-cloudy",
-    "partly_cloudy_night": "partly-cloudy-night",
-    "partly-cloudy-night": "partly-cloudy-night",
-    "⛅": "partly-cloudy",
-    "cloud": "cloud",
-    "cloudy": "cloudy",
-    "☁": "cloud",
-    "fog": "fog",
-    "mist": "fog",
-    "🌫": "fog",
-    "drizzle": "drizzle",
-    "showers": "showers",
-    "showers_night": "showers-night",
-    "showers-night": "showers-night",
-    "🌦": "showers",
-    "rain": "rain",
-    "☂": "rain",
-    "🌧": "rain",
-    "freezing_rain": "freezing-rain",
-    "freezing-rain": "freezing-rain",
-    "sleet": "sleet",
-    "rain_snow": "sleet",
-    "rain-snow": "sleet",
-    "snow": "snow",
-    "snow_showers": "snow-showers",
-    "snow-showers": "snow-showers",
-    "snow_showers_night": "snow-showers-night",
-    "snow-showers-night": "snow-showers-night",
-    "snow_grains": "snow-grains",
-    "snow-grains": "snow-grains",
-    "❄": "snow",
-    "ice": "ice",
-    "hail": "hail",
-    "thunder": "thunder",
-    "thunder_night": "thunder-night",
-    "thunder-night": "thunder-night",
-    "thunder_hail": "thunder-hail",
-    "thunder-hail": "thunder-hail",
-    "storm": "thunder",
-    "⛈": "thunder",
-    "⚡": "thunder",
-    "unknown": "unknown",
-    "•": "unknown",
-}
+WEATHER_ICON_KEYS = frozenset({
+    "sun", "moon", "partly-cloudy", "partly-cloudy-night", "cloud", "cloudy",
+    "fog", "drizzle", "showers", "showers-night", "rain", "freezing-rain",
+    "snow", "snow-showers", "snow-showers-night", "snow-grains",
+    "thunder", "thunder-night", "thunder-hail", "unknown",
+})
 
 
 def register_app_fonts() -> None:
@@ -446,7 +392,7 @@ def register_app_fonts() -> None:
 
 def _normalize_weather_icon_key(icon_key: object) -> str:
     normalized = icon_key.strip().lower() if isinstance(icon_key, str) else ""
-    return WEATHER_ICON_ALIASES.get(normalized, "unknown")
+    return normalized if normalized in WEATHER_ICON_KEYS else "unknown"
 
 
 def _weather_icon_path(icon_key: str) -> Path:
@@ -509,10 +455,7 @@ def build_weather_icon_photo(icon_key: str, width: int, height: int):
 
 
 def build_weather_tray_icon(icon_key: str):
-    image = _resize_weather_icon_image(_load_weather_icon_image(icon_key), 64, 64)
-    if image is None:
-        return None
-    return image
+    return _resize_weather_icon_image(_load_weather_icon_image(icon_key), 64, 64)
 
 
 def _metric_icon_path(icon_key: str) -> Path:
@@ -540,10 +483,6 @@ def build_metric_icon_photo(icon_key: str, width: int, height: int):
     if image is None:
         return None
     return ImageTk.PhotoImage(image)
-
-
-def build_tray_symbol_icon(symbol_text: str):
-    return build_weather_tray_icon(_normalize_weather_icon_key(symbol_text))
 
 
 def _hex_to_rgb(color: str) -> tuple[int, int, int]:
@@ -1581,7 +1520,6 @@ class WeatherWidget(tk.Tk):
         self.latest_weather: dict | None = None
         self.last_weather_update: datetime | None = None
         self.tray_icon = None
-        self.tray_symbol = "cloud"
         self.popup_bg_photo = None
         self.weather_icon_photo_cache: dict[tuple[str, int, int], tk.PhotoImage] = {}
         self.rain_mm_umbrella_icon_photo = build_metric_icon_photo("umbrella", 14, 14)
@@ -1716,7 +1654,7 @@ class WeatherWidget(tk.Tk):
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 "Lopeta",
-                lambda _icon, _item: self._call_on_ui_thread(self._quit_from_tray),
+                lambda _icon, _item: self._call_on_ui_thread(self.destroy),
             ),
         ]
         if not IS_FROZEN:
@@ -1731,7 +1669,7 @@ class WeatherWidget(tk.Tk):
             )
         menu = pystray.Menu(*menu_items)
 
-        tray_image = build_tray_symbol_icon(self.tray_symbol)
+        tray_image = build_weather_tray_icon("cloud")
         if tray_image is None:
             self.status_var.set("Tray-kuvaketta ei voitu luoda.")
             self.deiconify()
@@ -1962,8 +1900,7 @@ class WeatherWidget(tk.Tk):
             return
         self.destroy()
 
-    def _update_tray_symbol(self, symbol_text: str, title_text: str) -> None:
-        self.tray_symbol = symbol_text
+    def _update_tray_icon(self, icon_key: str, title_text: str) -> None:
         if not self.tray_icon:
             return
 
@@ -1974,16 +1911,13 @@ class WeatherWidget(tk.Tk):
                 title_text = encoded_title[: (TRAY_TOOLTIP_MAX_UTF16_UNITS - 3) * 2].decode(
                     "utf-16-le", errors="ignore"
                 ) + "..."
-            tray_image = build_tray_symbol_icon(symbol_text)
+            tray_image = build_weather_tray_icon(icon_key)
             if tray_image is not None:
                 self.tray_icon.icon = tray_image
             self.tray_icon.title = title_text
         except Exception:  # noqa: BLE001
             # The tray is secondary to the forecast and must not abort a refresh.
             self.report_callback_exception(*sys.exc_info())
-
-    def _quit_from_tray(self) -> None:
-        self.destroy()
 
     def _start_background_worker(
         self, target: Callable[[], None], *, on_error: Callable[[str], None] | None = None,
@@ -2772,7 +2706,7 @@ class WeatherWidget(tk.Tk):
         self.clock_job = self.after(1000, self._tick_clock)
 
     def toggle_popup(self) -> None:
-        if not self.popup:
+        if self._is_destroying or not self.popup:
             return
 
         if self.popup.winfo_viewable():
@@ -2780,6 +2714,8 @@ class WeatherWidget(tk.Tk):
             return
 
         self._ensure_fresh_weather()
+        if self._is_destroying:
+            return
         self.popup.deiconify()
         self._tick_clock()
         self.popup.lift()
@@ -2996,9 +2932,9 @@ class WeatherWidget(tk.Tk):
             style = resolve_weather_style(current.get("weather_code"), _is_daytime(current.get("is_day")))
             city_text = format_city(self.latest_place) if isinstance(self.latest_place, dict) else self.city_var.get()
             current_temp = format_temperature(current.get("temperature_2m"), self.unit_symbol)
-            self._update_tray_symbol(style.icon_key, f"{city_text}: {current_temp} (päivitys epäonnistui)")
+            self._update_tray_icon(style.icon_key, f"{city_text}: {current_temp} (päivitys epäonnistui)")
         else:
-            self._update_tray_symbol("unknown", f"{APP_NAME}: päivitys epäonnistui")
+            self._update_tray_icon("unknown", f"{APP_NAME}: päivitys epäonnistui")
         # A modal dialog can close the app or complete a newer request. Schedule
         # first so its nested event loop cannot leave us overwriting a newer timer.
         self._schedule_refresh(retry_delay)
@@ -3211,7 +3147,7 @@ class WeatherWidget(tk.Tk):
         )
 
         self.status_var.set("")
-        self._update_tray_symbol(style.icon_key, f"{city_text}: {current_temp} {style.label}")
+        self._update_tray_icon(style.icon_key, f"{city_text}: {current_temp} {style.label}")
         if (
             not self.city_search.editing
             and _normalize_city_query(self.detail_city_var.get()).casefold() == requested_city_text.casefold()

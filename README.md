@@ -110,7 +110,11 @@ Up to 32 successful suggestion queries are cached in memory for five minutes
 from their response, reducing repeated requests while editing. Empty or failed
 lookups are not cached, and the cache is not written to disk. Moving the dropdown
 without changing its labels preserves its rows and selection without rebuilding it.
+Cached suggestions and Enter confirmation remain immediately available while
+an unrelated lookup finishes; its stale result cannot replace the selection.
 The popup clock runs only while the card is open and updates immediately on reopening.
+Closing the app during a popup refresh error also cancels the pending popup
+opening, so it cannot access an already destroyed window.
 After confirmation, switching windows or hiding the popup does not cancel the
 search or let its completion steal keyboard focus. Escape or editing the query
 still cancels a pending suggestion selection. If a confirmed location's weather
@@ -234,12 +238,18 @@ path. Foreign Git overrides are injected explicitly by their dedicated tests.
 
 ## Bundled Assets
 
-Weather Report ships with its own transparent PNG/SVG weather icon set under
+Weather Report uses its own transparent PNG weather icon set under
 `assets/weather-icons/`. The Tkinter UI alpha-trims and scales these assets for
-the compact card, forecast panel, and Windows tray icon.
+the compact card, forecast panel, and Windows tray icon. The set covers all
+mapped WMO codes, their day/night variants, and startup/error fallbacks.
 
 Metric row icons live under `assets/metric-icons/` and use the same visual style
 for rain amount, rain probability, humidity/fog, and wind indicators.
+
+Editable SVG counterparts and the original `assets/logo-source.png` stay in
+the repository for asset maintenance. Executable packages include the runtime
+PNGs, app icon, fonts, and licenses, but omit these design sources and the
+icon directories' development READMEs. Packaging tests check the exact file list.
 
 The app also bundles the Exo 2 font under `assets/fonts/` and registers it as a
 private runtime font on Windows. Users do not need to install the font manually.
@@ -261,11 +271,15 @@ and 3.13 before building or publishing. Branch pushes and pull requests run the
 standalone tests; version tags run them through `Release`, without a duplicate
 standalone tag run. It verifies that the tag matches the app
 metadata and belongs to `main`, and builds the package on Windows. It uploads the ZIP
-and `SHA256SUMS.txt` to a draft release before publishing it as the latest
-release. A failed build or upload does not replace the latest published version.
+and `SHA256SUMS.txt` to a draft release before publishing it. The newest stable
+version is marked as Latest. A failed build or upload does not replace it.
 Rerunning a failed workflow can reuse the tag's existing draft and replace its
 ZIP and checksum before publishing. Already-published releases are not modified;
 changes to them require a new version tag.
+Release workflow runs are serialized across tags. Before publishing, the workflow
+compares all published stable version tags numerically: retrying an older draft
+does not replace a newer version as Latest. A failed version lookup or an
+unrecognized stable tag leaves the uploaded release as a draft for inspection.
 
 For local publishing, including optional Inno Setup installers, install GitHub
 CLI once and sign in:
@@ -350,6 +364,9 @@ even when Git's status configuration normally hides them.
 That local restart check works without an internet connection and compares file
 content hashes, so timestamp-only changes do not request a
 restart and same-size edits with identical timestamps are still detected.
+Only running code, launchers, metadata, PNG/ICO assets, and font files are tracked;
+SVG editing sources, the original logo source, and documentation do not trigger
+a restart prompt.
 Only one update
 can run at a time, including confirmation and restart. In-app restarts reuse the
 working Python environment instead of searching for another Python installation.

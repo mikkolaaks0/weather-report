@@ -153,6 +153,22 @@ class TimerLifecycleTests(unittest.TestCase):
         update_clock.assert_not_called()
         self.assertIsNone(widget.clock_job)
 
+    def test_closing_during_popup_refresh_error_does_not_reopen_destroyed_window(self) -> None:
+        widget = self.widget
+
+        def fail_to_start(_target, *, on_error):
+            on_error("thread limit")
+
+        with (
+            patch.object(widget, "_start_background_worker", side_effect=fail_to_start),
+            patch.object(main.messagebox, "showerror", side_effect=lambda *_args: widget.destroy()) as dialog,
+        ):
+            widget.toggle_popup()
+            dialog.assert_called_once()
+            widget.toggle_popup()
+        self.assertTrue(widget._is_destroying)
+        self.assertIsNone(widget.clock_job)
+
     def test_clock_refreshes_immediately_on_open_and_stops_on_hide(self) -> None:
         widget = self.widget
         first = main.datetime(2026, 9, 26, 12, 0)

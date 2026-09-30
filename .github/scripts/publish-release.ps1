@@ -32,7 +32,19 @@ function Publish-ReleaseAssets {
     # Retry replaces the ZIP and checksum while the release is still a draft.
     gh release upload $Tag @Artifacts --clobber
     if ($LASTEXITCODE -ne 0) { throw 'Upload failed; release remains a draft.' }
-    gh release edit $Tag --draft=false --latest
+
+    # A retry of an older draft must not roll back the installer's latest release.
+    $publishedTags = @(gh api 'repos/{owner}/{repo}/releases?per_page=100' --paginate --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
+    if ($LASTEXITCODE -ne 0) { throw 'Could not check published versions; release remains a draft.' }
+    $version = [version]$Tag.Substring(1)
+    $latest = $true
+    foreach ($publishedTag in $publishedTags) {
+        if ($publishedTag -cnotmatch '^v?\d+\.\d+\.\d+$') {
+            throw "Unrecognized published version: $publishedTag. Release remains a draft."
+        }
+        if ([version]$publishedTag.TrimStart('v') -ge $version) { $latest = $false }
+    }
+    gh release edit $Tag --draft=false "--latest=$($latest.ToString().ToLowerInvariant())"
     if ($LASTEXITCODE -ne 0) { throw 'Could not publish the completed release.' }
 }
 

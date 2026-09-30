@@ -398,20 +398,26 @@ try {
         foreach ($artifact in $artifacts) { [System.IO.File]::WriteAllText($artifact, 'test artifact') }
         $draftJson = '{"tagName":"v1.2.3","isDraft":true}'
         foreach ($case in @(
-            @{ Name = 'new'; Json = ''; Fail = 'view'; Calls = 'view,create,upload,edit'; Reject = $false },
-            @{ Name = 'retry draft'; Json = $draftJson; Calls = 'view,upload,edit'; Reject = $false },
+            @{ Name = 'new'; Json = ''; Fail = 'view'; Calls = 'view,create,upload,api,edit'; Reject = $false; Latest = 'true' },
+            @{ Name = 'retry draft'; Json = $draftJson; Published = @('v1.2.2', 'v1.1.9'); Calls = 'view,upload,api,edit'; Reject = $false; Latest = 'true' },
+            @{ Name = 'old draft retry'; Json = $draftJson; Published = @('v1.1.0', 'v1.10.0'); Calls = 'view,upload,api,edit'; Reject = $false; Latest = 'false' },
+            @{ Name = 'same version published'; Json = $draftJson; Published = @('1.2.3'); Calls = 'view,upload,api,edit'; Reject = $false; Latest = 'false' },
             @{ Name = 'published'; Json = '{"tagName":"v1.2.3","isDraft":false}'; Calls = 'view'; Reject = $true },
             @{ Name = 'wrong tag'; Json = '{"tagName":"v1.2.4","isDraft":true}'; Calls = 'view'; Reject = $true },
             @{ Name = 'invalid state'; Json = '{"tagName":"v1.2.3","isDraft":"false"}'; Calls = 'view'; Reject = $true },
             @{ Name = 'invalid JSON'; Json = 'invalid'; Calls = 'view'; Reject = $true },
             @{ Name = 'create failure'; Json = ''; Fail = @('view', 'create'); Calls = 'view,create'; Reject = $true },
             @{ Name = 'upload failure'; Json = $draftJson; Fail = 'upload'; Calls = 'view,upload'; Reject = $true },
-            @{ Name = 'publish failure'; Json = $draftJson; Fail = 'edit'; Calls = 'view,upload,edit'; Reject = $true }
+            @{ Name = 'version lookup failure'; Json = $draftJson; Fail = 'api'; Calls = 'view,upload,api'; Reject = $true },
+            @{ Name = 'unrecognized stable tag'; Json = $draftJson; Published = @('stable'); Calls = 'view,upload,api'; Reject = $true },
+            @{ Name = 'publish failure'; Json = $draftJson; Fail = 'edit'; Calls = 'view,upload,api,edit'; Reject = $true; Latest = 'true' }
         )) {
             $calls = New-Object 'System.Collections.Generic.List[string]'
             function gh {
-                Assert-True ($args[0] -eq 'release' -and $args[2] -ceq 'v1.2.3') 'Unexpected release command'
-                $command = $args[1]
+                $command = if ($args[0] -eq 'api') { 'api' } else { $args[1] }
+                if ($command -ne 'api') {
+                    Assert-True ($args[0] -eq 'release' -and $args[2] -ceq 'v1.2.3') 'Unexpected release command'
+                }
                 $calls.Add($command)
                 $global:LASTEXITCODE = if (@($case.Fail) -contains $command) { 1 } else { 0 }
                 switch ($command) {
@@ -426,15 +432,22 @@ try {
                         }
                     }
                     'edit' {
-                        Assert-True ($args -contains '--draft=false' -and $args -contains '--latest') 'Release was not published as latest'
+                        Assert-True ($args -contains '--draft=false' -and $args -contains "--latest=$($case.Latest)") 'Release changed latest incorrectly'
+                    }
+                    'api' {
+                        Assert-True ($args[1] -ceq 'repos/{owner}/{repo}/releases?per_page=100') 'Unexpected release endpoint'
+                        Assert-True ($args -contains '--paginate') 'Version lookup missed older pages'
+                        Assert-True ($args -contains '.[] | select(.draft == false and .prerelease == false) | .tag_name') 'Version comparison included unpublished versions'
+                        if ($case.Published) { return $case.Published }
                     }
                     default { throw "Unexpected release command: $command" }
                 }
             }
             $rejected = $false
+            $errorMessage = ''
             try { Publish-ReleaseAssets -Tag 'v1.2.3' -Artifacts $artifacts }
-            catch { $rejected = $true }
-            Assert-True ($rejected -eq $case.Reject) "Wrong release result: $($case.Name)"
+            catch { $rejected = $true; $errorMessage = $_.Exception.Message }
+            Assert-True ($rejected -eq $case.Reject) "Wrong release result: $($case.Name): $errorMessage"
             Assert-True (($calls -join ',') -ceq $case.Calls) "Unsafe release command sequence: $($case.Name): $calls"
         }
         $calls.Clear()

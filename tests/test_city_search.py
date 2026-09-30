@@ -232,11 +232,33 @@ class AutocompleteTests(unittest.TestCase):
         self.variable.set("Hel")
         self.control.confirm()
         self.assertEqual(len(self.workers), 1)
+        self.submit.assert_called_once_with("Helsinki", place())
+        self.assertTrue(self.control.inflight)
         self.search.return_value = [place("Espoo")]
         self.finish_request()
         self.assertEqual(self.workers, [])
         self.submit.assert_called_once_with("Helsinki", place())
         self.assertNotIn("Esp", self.control._query_cache)
+        self.assertFalse(self.control.inflight)
+
+    def test_editing_after_cached_results_still_waits_for_only_one_network_request(self):
+        self.results_for("Hel")
+        self.variable.set("Esp")
+        self.control._request()
+        self.variable.set("Hel")
+        self.control._request()
+        self.assertEqual(self.control.rows, [place(), place("Helsingborg")])
+        self.assertTrue(self.control.inflight)
+        self.variable.set("Tam")
+        self.control.confirm()
+        self.assertEqual(len(self.workers), 1)
+        self.search.return_value = [place("Espoo")]
+        self.finish_request()
+        self.submit.assert_not_called()
+        self.assertEqual(len(self.workers), 1)
+        self.search.return_value = [place("Tampere")]
+        self.finish_request()
+        self.submit.assert_called_once_with("Tampere", place("Tampere"))
         self.assertFalse(self.control.inflight)
 
     def test_unchanged_layout_preserves_rows_selection_and_scroll_position(self):

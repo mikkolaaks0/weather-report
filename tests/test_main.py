@@ -70,7 +70,7 @@ class WeatherStyleTests(unittest.TestCase):
             for is_day in (True, False):
                 with self.subTest(code=code, is_day=is_day):
                     style = main.resolve_weather_style(code, is_day)
-                    tray_icon = main.build_tray_symbol_icon(style.icon_key)
+                    tray_icon = main.build_weather_tray_icon(style.icon_key)
                     self.assertIsNotNone(tray_icon)
                     self.assertEqual(tray_icon.size, (64, 64))
 
@@ -80,6 +80,23 @@ class WeatherStyleTests(unittest.TestCase):
         self.assertEqual(main.resolve_weather_style(float("nan")).icon_key, "unknown")
         self.assertEqual(main._normalize_weather_icon_key(" SUN "), "sun")
         self.assertEqual(main._weather_icon_path("not-an-icon").name, "unknown.png")
+
+    def test_weather_library_contains_only_mapped_or_fallback_icons(self) -> None:
+        used_keys = {
+            main.resolve_weather_style(code, is_day).icon_key
+            for code in KNOWN_WMO_CODES for is_day in (True, False)
+        } | {"cloud", "unknown"}
+        self.assertEqual(main.WEATHER_ICON_KEYS, used_keys)
+        for extension in ("png", "svg"):
+            self.assertEqual(
+                {path.stem for path in main.WEATHER_ICONS_DIR.glob(f"*.{extension}")},
+                used_keys,
+            )
+
+    def test_invalid_icon_keys_cannot_escape_the_weather_library(self) -> None:
+        for key in (None, 0, [], "", "../logo", "../../logo", "C:/icon", "rain_snow"):
+            with self.subTest(key=key):
+                self.assertEqual(main._weather_icon_path(key), main.WEATHER_ICONS_DIR / "unknown.png")
 
     def test_weather_and_metric_pngs_have_svg_sources_and_transparency(self) -> None:
         if main.Image is None:
@@ -747,7 +764,6 @@ class SettingsAndShortcutTests(unittest.TestCase):
 class TrayMenuTests(unittest.TestCase):
     def test_partial_tray_startup_is_cleaned_up_before_showing_fallback(self) -> None:
         widget = object.__new__(main.WeatherWidget)
-        widget.tray_symbol = "cloud"
         widget.status_var = Mock()
         widget.deiconify = Mock()
         tray = Mock()
@@ -756,7 +772,7 @@ class TrayMenuTests(unittest.TestCase):
         fake_pystray.Icon.return_value = tray
         with (
             patch.object(main, "pystray", fake_pystray),
-            patch.object(main, "build_tray_symbol_icon", return_value=object()),
+            patch.object(main, "build_weather_tray_icon", return_value=object()),
             self.assertLogs(main.LOGGER, level="ERROR") as logs,
         ):
             widget._init_tray_icon()
@@ -785,8 +801,8 @@ class TrayMenuTests(unittest.TestCase):
         widget.report_callback_exception = Mock()
         titles = ("Espoo: 18 C", "A" * 127, "A" * 200, "x" + "\U0001f600" * 100)
         for title in titles:
-            with self.subTest(length=len(title)), patch.object(main, "build_tray_symbol_icon", return_value=None):
-                widget._update_tray_symbol("cloudy", title)
+            with self.subTest(length=len(title)), patch.object(main, "build_weather_tray_icon", return_value=None):
+                widget._update_tray_icon("cloudy", title)
                 actual = widget.tray_icon.title
                 self.assertLessEqual(len(actual.encode("utf-16-le")), 254)
                 ctypes.create_unicode_buffer(128).value = actual
@@ -906,7 +922,6 @@ class TrayMenuTests(unittest.TestCase):
 
         widget = object.__new__(main.WeatherWidget)
         widget.tray_icon = None
-        widget.tray_symbol = "cloud"
         widget._call_on_ui_thread = lambda callback: callback()
         widget.status_var = type("Status", (), {"set": lambda _self, _value: None})()
         calls = []
@@ -915,14 +930,14 @@ class TrayMenuTests(unittest.TestCase):
         widget._toggle_startup_from_tray = lambda: calls.append("startup")
         widget._create_desktop_shortcut_from_tray = lambda: calls.append("desktop")
         widget._open_taskbar_icon_settings = lambda: calls.append("taskbar")
-        widget._quit_from_tray = lambda: calls.append("quit")
+        widget.destroy = lambda: calls.append("quit")
         widget.check_for_app_update = lambda manual=False: calls.append(("update", manual))
 
         with (
             patch.object(main, "pystray", FakePystray),
             patch.object(main, "Image", object()),
             patch.object(main, "IS_FROZEN", False),
-            patch.object(main, "build_tray_symbol_icon", return_value=object()),
+            patch.object(main, "build_weather_tray_icon", return_value=object()),
         ):
             widget._init_tray_icon()
 
@@ -1029,12 +1044,15 @@ class UpdateSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
             (root / "main.py").write_text("pass", encoding="utf-8")
-            assets = root / "assets"
-            assets.mkdir()
+            assets = root / "assets" / "weather-icons"
+            assets.mkdir(parents=True)
             icon = assets / "sun.png"
             with patch.object(main, "PROJECT_DIR", root), patch.object(main, "IS_FROZEN", False):
                 original = main._runtime_file_signature()
                 (root / "README.md").write_text("docs", encoding="utf-8")
+                (assets / "README.md").write_text("icon docs", encoding="utf-8")
+                (assets / "sun.svg").write_text("editable source", encoding="utf-8")
+                (root / "assets" / "logo-source.png").write_bytes(b"design source")
                 self.assertEqual(main._runtime_file_signature(), original)
                 icon.write_bytes(b"image")
                 added = main._runtime_file_signature()
@@ -1054,6 +1072,24 @@ class UpdateSafetyTests(unittest.TestCase):
                 changed = main._runtime_file_signature()
                 os.utime(metadata, ns=(saved_stat.st_atime_ns, saved_stat.st_mtime_ns + 2_000_000_000))
                 self.assertEqual(main._runtime_file_signature(), changed)
+
+    def test_runtime_signature_tracks_every_kind_of_runtime_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(main, "PROJECT_DIR", root), patch.object(main, "IS_FROZEN", False):
+                original = main._runtime_file_signature()
+                for name in (
+                    "assets/logo.png", "assets/app.ico", "assets/fonts/Exo2-Regular.ttf",
+                    "assets/metric-icons/wind.png", "assets/weather-icons/sun.png",
+                    "main.py", "city_search.py", "start_weather_app.bat", "start_weather_app.vbs",
+                ):
+                    with self.subTest(name=name):
+                        path = root / name
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(b"runtime content")
+                        self.assertNotEqual(main._runtime_file_signature(), original)
+                        path.unlink()
+                        self.assertEqual(main._runtime_file_signature(), original)
 
     def test_update_status_handles_non_repository_and_git_comparison_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir, patch.object(
@@ -1251,7 +1287,7 @@ class WeatherResultTests(unittest.TestCase):
         widget._apply_current_weather_summary = Mock()
         widget._apply_today_detail_metrics = Mock()
         widget._apply_forecast_cards = Mock()
-        widget._update_tray_symbol = Mock()
+        widget._update_tray_icon = Mock()
         widget._schedule_refresh = Mock()
         widget._run_pending_city_search = Mock()
         widget.pending_city_search = None
@@ -1416,7 +1452,7 @@ class WeatherResultTests(unittest.TestCase):
             )
         self.assertEqual(widget.refresh_target, ("Espoo", None))
         show_error.assert_not_called()
-        widget._update_tray_symbol.assert_not_called()
+        widget._update_tray_icon.assert_not_called()
         widget._schedule_refresh.assert_not_called()
         self.assertFalse(widget.fetch_in_progress)
         widget._run_pending_city_search.assert_called_once()
@@ -1440,11 +1476,11 @@ class WeatherResultTests(unittest.TestCase):
                 raise OSError("tray temporarily unavailable")
 
         widget = self.make_result_widget()
-        del widget._update_tray_symbol
+        del widget._update_tray_icon
         widget.tray_icon = FailingTray()
         widget.report_callback_exception = Mock()
         weather = {"current": {"weather_code": 3, "temperature_2m": 18}, "daily": {"time": ["2026-09-03"]}}
-        with patch.object(main, "build_tray_symbol_icon", return_value=object()):
+        with patch.object(main, "build_weather_tray_icon", return_value=object()):
             widget._apply_weather({"name": "Espoo"}, weather, "Espoo")
         self.assertIs(widget.latest_weather, weather)
         self.assertFalse(widget.fetch_in_progress)
@@ -1725,14 +1761,19 @@ class PackagingManifestTests(unittest.TestCase):
         packaged_sources = {Path(source).resolve() for source, _destination in namespace["datas"]}
         required_sources = {
             (main.PROJECT_DIR / "app_metadata.json").resolve(),
-            *(path.resolve() for path in main.WEATHER_ICONS_DIR.iterdir() if path.is_file()),
-            *(path.resolve() for path in main.METRIC_ICONS_DIR.iterdir() if path.is_file()),
-            *(path.resolve() for path in main.FONTS_DIR.iterdir() if path.is_file()),
+            *(path.resolve() for path in main.WEATHER_ICONS_DIR.glob("*.png")),
+            *(path.resolve() for path in main.METRIC_ICONS_DIR.glob("*.png")),
+            *(path.resolve() for path in main.FONTS_DIR.glob("*.ttf")),
+            (main.FONTS_DIR / "OFL-Exo2.txt").resolve(),
+            *(main.PROJECT_DIR / name for name in ("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md")),
             main.APP_ICON_PATH.resolve(),
             main.APP_LOGO_PATH.resolve(),
         }
-        self.assertTrue(required_sources)
-        self.assertTrue(required_sources.issubset(packaged_sources))
+        self.assertEqual(required_sources, packaged_sources)
+        for source, destination in namespace["datas"]:
+            path = Path(source)
+            self.assertTrue(path.is_file())
+            self.assertEqual(destination, path.relative_to(main.PROJECT_DIR).parent.as_posix())
         legacy_tray_asset = (main.ASSETS_DIR / "tray.png").resolve()
         self.assertFalse(legacy_tray_asset.exists())
         self.assertNotIn(legacy_tray_asset, packaged_sources)

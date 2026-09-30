@@ -116,7 +116,7 @@ class CitySearch(tk.Frame):
     def _request(self) -> None:
         self._cancel_debounce()
         self.ready = True
-        if self.inflight or self.closed:
+        if self.closed:
             return
         cached = self._query_cache.get(self.query)
         if cached is not None:
@@ -126,6 +126,8 @@ class CitySearch(tk.Frame):
                 self._present_results([dict(place) for place in rows], False)
                 return
             del self._query_cache[self.query]
+        if self.inflight:
+            return
         self.inflight = True
         generation, query = self.generation, self.query
 

@@ -29,11 +29,8 @@ version_info = VSVersionInfo(
 datas = []
 
 
-def add_data_dir(source_dir, destination):
-    if not source_dir.exists():
-        return
-
-    for file_path in source_dir.iterdir():
+def add_data_dir(source_dir, destination, pattern):
+    for file_path in sorted(source_dir.glob(pattern)):
         if file_path.is_file():
             datas.append((str(file_path), destination))
 
@@ -45,15 +42,16 @@ data_files = [
     ("THIRD_PARTY_NOTICES.md", "."),
     ("assets/logo.png", "assets"),
     ("assets/app.ico", "assets"),
+    ("assets/fonts/OFL-Exo2.txt", "assets/fonts"),
 ]
 for filename, destination in data_files:
     file_path = project_dir / filename
     if file_path.exists():
         datas.append((str(file_path), destination))
 
-add_data_dir(project_dir / "assets" / "weather-icons", "assets/weather-icons")
-add_data_dir(project_dir / "assets" / "metric-icons", "assets/metric-icons")
-add_data_dir(project_dir / "assets" / "fonts", "assets/fonts")
+add_data_dir(project_dir / "assets" / "weather-icons", "assets/weather-icons", "*.png")
+add_data_dir(project_dir / "assets" / "metric-icons", "assets/metric-icons", "*.png")
+add_data_dir(project_dir / "assets" / "fonts", "assets/fonts", "*.ttf")
 
 
 a = Analysis(
