@@ -258,8 +258,9 @@ the repository for asset maintenance. Executable packages include the runtime
 PNGs, app icon, fonts, and licenses, but omit these design sources and the
 icon directories' development READMEs. Packaging tests check the exact file list.
 
-The app also bundles the Exo 2 font under `assets/fonts/` and registers it as a
-private runtime font on Windows. Users do not need to install the font manually.
+The app bundles the Regular and Bold cuts of Exo 2 under `assets/fonts/` and
+registers them as private runtime fonts on Windows. Users do not need to install
+the font manually.
 
 ## Publish A Release
 

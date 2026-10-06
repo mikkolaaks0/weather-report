@@ -76,13 +76,10 @@ RUNTIME_DIR = Path(getattr(sys, "_MEIPASS", PROJECT_DIR))
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 APP_EXECUTABLE_PATH = Path(sys.executable).resolve()
 APP_WORKING_DIR = APP_EXECUTABLE_PATH.parent if IS_FROZEN else PROJECT_DIR
-APP_METADATA = json.loads((RUNTIME_DIR / "app_metadata.json").read_text(encoding="utf-8"))
-APP_VERSION = APP_METADATA["version"]
-APP_VERSION_DATE = APP_METADATA["date"]
-APP_VERSION_LABEL = APP_VERSION_DATE
+APP_VERSION_DATE = json.loads((RUNTIME_DIR / "app_metadata.json").read_text(encoding="utf-8"))["date"]
 FOOTER_TEXT = (
     f"Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot "
-    f"• Versio: {APP_VERSION_LABEL}"
+    f"• Versio: {APP_VERSION_DATE}"
 )
 
 
@@ -142,7 +139,6 @@ METRIC_ICONS_DIR = ASSETS_DIR / "metric-icons"
 FONTS_DIR = ASSETS_DIR / "fonts"
 EXO2_FONT_FILES = (
     FONTS_DIR / "Exo2-Regular.ttf",
-    FONTS_DIR / "Exo2-SemiBold.ttf",
     FONTS_DIR / "Exo2-Bold.ttf",
 )
 APP_FONTS_REGISTERED = False
@@ -752,7 +748,6 @@ def _request_with_retry(
             if attempt == attempts - 1:
                 raise
         time.sleep(max(0.0, retry_delay_seconds))
-    raise RuntimeError("Verkkopyyntö ei palauttanut tulosta.")
 
 
 def _as_dict(value: object) -> dict:
@@ -1092,7 +1087,7 @@ def _hidden_subprocess_kwargs() -> dict:
     startupinfo.wShowWindow = 0
     return {
         "startupinfo": startupinfo,
-        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "creationflags": subprocess.CREATE_NO_WINDOW,
     }
 
 
@@ -1417,7 +1412,7 @@ def check_github_update_status() -> dict:
     remote_ref = f"{UPDATE_REMOTE}/{UPDATE_BRANCH}"
     remote_sha = _git_output(["rev-parse", remote_ref])
     if local_sha == remote_sha:
-        return {"state": "current", "message": f"Sovellus on ajan tasalla. Versio: {APP_VERSION_LABEL}."}
+        return {"state": "current", "message": f"Sovellus on ajan tasalla. Versio: {APP_VERSION_DATE}."}
 
     try:
         ancestor = _run_git_command(["merge-base", "--is-ancestor", "HEAD", remote_ref])
@@ -1821,7 +1816,7 @@ class WeatherWidget(tk.Tk):
         if state == "available":
             should_update = messagebox.askyesno(
                 APP_NAME,
-                f"GitHubissa on uudempi versio kuin {APP_VERSION_LABEL}. "
+                f"GitHubissa on uudempi versio kuin {APP_VERSION_DATE}. "
                 "Päivitetäänkö sovellus nyt ja käynnistetäänkö se uudelleen?",
             )
             if self._is_destroying:
@@ -1985,7 +1980,7 @@ class WeatherWidget(tk.Tk):
         shell = tk.Frame(self, bg=DARK_BG, padx=8, pady=8)
         shell.pack(fill="both", expand=True)
 
-        self.widget_card = tk.Frame(
+        card = tk.Frame(
             shell,
             bg=SURFACE_BG,
             highlightthickness=1,
@@ -1994,10 +1989,10 @@ class WeatherWidget(tk.Tk):
             pady=8,
             cursor="hand2",
         )
-        self.widget_card.pack(fill="both", expand=True)
-        self.widget_card.bind("<Button-1>", lambda _event: self.toggle_popup())
+        card.pack(fill="both", expand=True)
+        card.bind("<Button-1>", lambda _event: self.toggle_popup())
 
-        left = tk.Frame(self.widget_card, bg=SURFACE_BG)
+        left = tk.Frame(card, bg=SURFACE_BG)
         left.pack(side="left", fill="both", expand=True)
         left.bind("<Button-1>", lambda _event: self.toggle_popup())
 
@@ -2046,7 +2041,7 @@ class WeatherWidget(tk.Tk):
         self.widget_condition_label.pack(anchor="w", pady=(2, 0))
         self.widget_condition_label.bind("<Button-1>", lambda _event: self.toggle_popup())
 
-        right = tk.Frame(self.widget_card, bg=SURFACE_BG)
+        right = tk.Frame(card, bg=SURFACE_BG)
         right.pack(side="right", anchor="n")
 
         self._create_icon_button(right, "⟳", self.refresh_weather).pack(side="top")
@@ -2136,22 +2131,9 @@ class WeatherWidget(tk.Tk):
             font=(DISPLAY_FONT, 54, "bold"),
             fill="#FFFFFF",
         )
-        if self.rain_mm_umbrella_icon_photo is not None:
-            self.today_rain_mm_icon_label = self.popup_bg_canvas.create_image(
-                0,
-                0,
-                image=self.rain_mm_umbrella_icon_photo,
-                anchor="ne",
-            )
-        else:
-            self.today_rain_mm_icon_label = self.popup_bg_canvas.create_text(
-                0,
-                0,
-                text="☂",
-                anchor="ne",
-                font=(SYMBOL_FONT, 11),
-                fill="#F2F6FF",
-            )
+        self.today_rain_mm_icon_label = self._create_detail_icon(
+            self.rain_mm_umbrella_icon_photo, "☂", SYMBOL_FONT, "#F2F6FF",
+        )
         self.today_rain_mm_value_label = self.popup_bg_canvas.create_text(
             0,
             0,
@@ -2160,22 +2142,9 @@ class WeatherWidget(tk.Tk):
             font=(TEXT_FONT, 11),
             fill="#F2F6FF",
         )
-        if self.rain_prob_drop_icon_photo is not None:
-            self.today_rain_prob_icon_label = self.popup_bg_canvas.create_image(
-                0,
-                0,
-                image=self.rain_prob_drop_icon_photo,
-                anchor="ne",
-            )
-        else:
-            self.today_rain_prob_icon_label = self.popup_bg_canvas.create_text(
-                0,
-                0,
-                text="💧",
-                anchor="ne",
-                font=(EMOJI_FONT, 11),
-                fill="#8CC7FF",
-            )
+        self.today_rain_prob_icon_label = self._create_detail_icon(
+            self.rain_prob_drop_icon_photo, "💧", EMOJI_FONT, "#8CC7FF",
+        )
         self.today_rain_prob_value_label = self.popup_bg_canvas.create_text(
             0,
             0,
@@ -2184,22 +2153,9 @@ class WeatherWidget(tk.Tk):
             font=(TEXT_FONT, 11),
             fill="#F2F6FF",
         )
-        if self.humidity_fog_icon_photo is not None:
-            self.today_humidity_icon_label = self.popup_bg_canvas.create_image(
-                0,
-                0,
-                image=self.humidity_fog_icon_photo,
-                anchor="ne",
-            )
-        else:
-            self.today_humidity_icon_label = self.popup_bg_canvas.create_text(
-                0,
-                0,
-                text="🌫",
-                anchor="ne",
-                font=(SYMBOL_FONT, 11),
-                fill="#8CC7FF",
-            )
+        self.today_humidity_icon_label = self._create_detail_icon(
+            self.humidity_fog_icon_photo, "🌫", SYMBOL_FONT, "#8CC7FF",
+        )
         self.today_humidity_value_label = self.popup_bg_canvas.create_text(
             0,
             0,
@@ -2208,22 +2164,9 @@ class WeatherWidget(tk.Tk):
             font=(TEXT_FONT, 11),
             fill="#F2F6FF",
         )
-        if self.wind_swirl_icon_photo is not None:
-            self.today_wind_icon_label = self.popup_bg_canvas.create_image(
-                0,
-                0,
-                image=self.wind_swirl_icon_photo,
-                anchor="ne",
-            )
-        else:
-            self.today_wind_icon_label = self.popup_bg_canvas.create_text(
-                0,
-                0,
-                text="🌬",
-                anchor="ne",
-                font=(EMOJI_FONT, 11),
-                fill="#F2F6FF",
-            )
+        self.today_wind_icon_label = self._create_detail_icon(
+            self.wind_swirl_icon_photo, "🌬", EMOJI_FONT, "#F2F6FF",
+        )
         self.today_wind_value_label = self.popup_bg_canvas.create_text(
             0,
             0,
@@ -2248,22 +2191,9 @@ class WeatherWidget(tk.Tk):
             font=(TEXT_FONT, 16, "bold"),
             fill="#E3ECFF",
         )
-        if self.sunrise_sun_icon_photo is not None:
-            self.today_sun_icon_label = self.popup_bg_canvas.create_image(
-                0,
-                0,
-                image=self.sunrise_sun_icon_photo,
-                anchor="ne",
-            )
-        else:
-            self.today_sun_icon_label = self.popup_bg_canvas.create_text(
-                0,
-                0,
-                text="☀️",
-                anchor="ne",
-                font=(EMOJI_FONT, 11),
-                fill=ACCENT_GOLD,
-            )
+        self.today_sun_icon_label = self._create_detail_icon(
+            self.sunrise_sun_icon_photo, "☀️", EMOJI_FONT, ACCENT_GOLD,
+        )
         self.today_sunrise_time_label = self.popup_bg_canvas.create_text(
             0,
             0,
@@ -2272,22 +2202,9 @@ class WeatherWidget(tk.Tk):
             font=(TEXT_FONT, 11),
             fill="#CCD9F7",
         )
-        if self.sunset_moon_icon_photo is not None:
-            self.today_moon_icon_label = self.popup_bg_canvas.create_image(
-                0,
-                0,
-                image=self.sunset_moon_icon_photo,
-                anchor="ne",
-            )
-        else:
-            self.today_moon_icon_label = self.popup_bg_canvas.create_text(
-                0,
-                0,
-                text="🌙",
-                anchor="ne",
-                font=(EMOJI_FONT, 11),
-                fill=ACCENT_GOLD,
-            )
+        self.today_moon_icon_label = self._create_detail_icon(
+            self.sunset_moon_icon_photo, "🌙", EMOJI_FONT, ACCENT_GOLD,
+        )
         self.today_sunset_time_label = self.popup_bg_canvas.create_text(
             0,
             0,
@@ -2365,7 +2282,9 @@ class WeatherWidget(tk.Tk):
         )
         self.location_entry.pack(side="left", fill="both", expand=True, ipady=2)
 
-        self.search_button = self._create_icon_button(self.popup_bg_canvas, "Hae", self._search_from_popup, width=4)
+        self.search_button = self._create_icon_button(
+            self.popup_bg_canvas, "Hae", None, width=4,
+        )
         self.refresh_button = self._create_icon_button(self.popup_bg_canvas, "⟳", self.refresh_weather)
         self.close_button = self._create_icon_button(self.popup_bg_canvas, "✕", self._hide_popup)
         self.city_search = CitySearch(
@@ -2376,6 +2295,7 @@ class WeatherWidget(tk.Tk):
             max_query_length=MAX_CITY_QUERY_LENGTH,
         )
         self.city_search.chosen_place = self.latest_place
+        self.search_button.configure(command=self.city_search.confirm)
         self._configure_canvas_weather_icon(
             self.hero_icon_label,
             "cloud",
@@ -2428,6 +2348,13 @@ class WeatherWidget(tk.Tk):
         self._draw_popup_gradient(width, height)
         self._layout_popup_content(width, height)
 
+    def _create_detail_icon(self, photo, fallback_symbol: str, font_family: str, color: str) -> int:
+        if photo is not None:
+            return self.popup_bg_canvas.create_image(0, 0, image=photo, anchor="ne")
+        return self.popup_bg_canvas.create_text(
+            0, 0, text=fallback_symbol, anchor="ne", font=(font_family, 11), fill=color,
+        )
+
     def _layout_popup_content(self, width: int, height: int) -> None:
         pad = POPUP_CONTENT_PAD + 8
         left_nudge = 5
@@ -2437,20 +2364,15 @@ class WeatherWidget(tk.Tk):
         self.popup_bg_canvas.coords(self.hero_updated_label, pad + left_nudge, 32)
 
         control_y = 12
-        gap = 4
         right = width - pad
-
-        self.popup_bg_canvas.coords(self.close_button_window, right, control_y)
-        right -= self.close_button.winfo_reqwidth() + gap
-
-        self.popup_bg_canvas.coords(self.refresh_button_window, right, control_y)
-        right -= self.refresh_button.winfo_reqwidth() + gap
-
-        self.popup_bg_canvas.coords(self.search_button_window, right, control_y)
-        right -= self.search_button.winfo_reqwidth() + 6
-
-        self.popup_bg_canvas.coords(self.location_entry_window, right, control_y)
-        right -= self.location_entry_shell.winfo_reqwidth() + 8
+        for item, control, gap in (
+            (self.close_button_window, self.close_button, 4),
+            (self.refresh_button_window, self.refresh_button, 4),
+            (self.search_button_window, self.search_button, 6),
+            (self.location_entry_window, self.location_entry_shell, 8),
+        ):
+            self.popup_bg_canvas.coords(item, right, control_y)
+            right -= control.winfo_reqwidth() + gap
         self.popup_bg_canvas.coords(self.location_label, right, control_y + 4)
         label_bbox = self.popup_bg_canvas.bbox(self.location_label)
         label_width = (label_bbox[2] - label_bbox[0]) if label_bbox else 56
@@ -2702,8 +2624,7 @@ class WeatherWidget(tk.Tk):
         if self._is_destroying or not self.popup or self.popup.state() != "normal":
             return
         self.clock_var.set(format_clock_fi(datetime.now()))
-        if hasattr(self, "popup_bg_canvas") and hasattr(self, "clock_label"):
-            self.popup_bg_canvas.itemconfigure(self.clock_label, text=self.clock_var.get())
+        self.popup_bg_canvas.itemconfigure(self.clock_label, text=self.clock_var.get())
         self.clock_job = self.after(1000, self._tick_clock)
 
     def toggle_popup(self) -> None:
@@ -2749,9 +2670,6 @@ class WeatherWidget(tk.Tk):
         ):
             self.refresh_weather()
 
-    def _search_from_popup(self) -> None:
-        self.city_search.confirm()
-
     def _open_open_meteo_terms(self) -> None:
         try:
             opened = webbrowser.open_new_tab(OPEN_METEO_TERMS_URL)
@@ -2779,8 +2697,6 @@ class WeatherWidget(tk.Tk):
         return theme_keys[(current_index + 1) % len(theme_keys)]
 
     def _update_theme_dot_color(self) -> None:
-        if not hasattr(self, "theme_dot_item"):
-            return
         preview_theme_id = self._next_popup_theme_id()
         preview = POPUP_THEMES.get(preview_theme_id, POPUP_THEMES[DEFAULT_POPUP_THEME]).get("preview", "#2FA8CB")
         self.popup_bg_canvas.itemconfigure(self.theme_dot_item, fill=preview)

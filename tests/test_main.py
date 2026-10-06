@@ -1048,7 +1048,7 @@ class UpdateSafetyTests(unittest.TestCase):
             status = main.check_github_update_status()
 
         self.assertEqual(status["state"], "current")
-        self.assertIn(main.APP_VERSION_LABEL, status["message"])
+        self.assertIn(main.APP_VERSION_DATE, status["message"])
 
     def test_update_status_detects_code_changed_while_process_was_running(self) -> None:
         with patch.object(
@@ -1720,7 +1720,6 @@ class PackagingManifestTests(unittest.TestCase):
     def test_runtime_and_installer_use_the_release_metadata(self) -> None:
         metadata = json.loads((main.PROJECT_DIR / "app_metadata.json").read_text(encoding="utf-8"))
         installer_script = (main.PROJECT_DIR / "installer.iss").read_text(encoding="utf-8")
-        self.assertEqual(main.APP_VERSION, metadata["version"])
         self.assertEqual(main.APP_VERSION_DATE, metadata["date"])
         self.assertIn("#error AppVersion must be supplied", installer_script)
         self.assertIsNone(re.search(r'#define AppVersion "([^"]+)"', installer_script))
@@ -1729,7 +1728,8 @@ class PackagingManifestTests(unittest.TestCase):
         self.assertIn("Säädata: Open-Meteo", main.FOOTER_TEXT)
         self.assertIn("Käyttöehdot", main.FOOTER_TEXT)
         self.assertIn(f"• Versio: {main.APP_VERSION_DATE}", main.FOOTER_TEXT)
-        self.assertNotIn(main.APP_VERSION, main.FOOTER_TEXT)
+        metadata = json.loads((main.PROJECT_DIR / "app_metadata.json").read_text(encoding="utf-8"))
+        self.assertNotIn(metadata["version"], main.FOOTER_TEXT)
 
     def test_installers_share_location_and_replace_stale_startup_shortcuts(self) -> None:
         install_script = (main.PROJECT_DIR / "install.ps1").read_text(encoding="utf-8")
@@ -1787,7 +1787,8 @@ class PackagingManifestTests(unittest.TestCase):
         versioninfo = Mock()
         with patch.dict(sys.modules, {"PyInstaller.utils.win32.versioninfo": versioninfo}):
             exec(compile(spec_path.read_text(encoding="utf-8"), str(spec_path), "exec"), namespace)
-        version = tuple(int(part) for part in main.APP_VERSION.split(".")) + (0,)
+        metadata = json.loads((main.PROJECT_DIR / "app_metadata.json").read_text(encoding="utf-8"))
+        version = tuple(int(part) for part in metadata["version"].split(".")) + (0,)
         self.assertEqual(versioninfo.FixedFileInfo.call_args.kwargs["filevers"], version)
         self.assertEqual(versioninfo.FixedFileInfo.call_args.kwargs["prodvers"], version)
 
@@ -1796,7 +1797,7 @@ class PackagingManifestTests(unittest.TestCase):
             (main.PROJECT_DIR / "app_metadata.json").resolve(),
             *(path.resolve() for path in main.WEATHER_ICONS_DIR.glob("*.png")),
             *(path.resolve() for path in main.METRIC_ICONS_DIR.glob("*.png")),
-            *(path.resolve() for path in main.FONTS_DIR.glob("*.ttf")),
+            *(path.resolve() for path in main.EXO2_FONT_FILES),
             (main.FONTS_DIR / "OFL-Exo2.txt").resolve(),
             *(main.PROJECT_DIR / name for name in ("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md")),
             main.APP_ICON_PATH.resolve(),
