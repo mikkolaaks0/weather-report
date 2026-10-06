@@ -96,6 +96,33 @@ try {
                 try { Assert-SafeInstallDirectory $unsafePath } catch { $rejected = $true }
                 Assert-True $rejected "$scriptName accepted an unsafe install path"
             }
+
+            $existingPath = Join-Path $testDir "$scriptName\WeatherReport"
+            New-Item -ItemType Directory -Path (Split-Path -Parent $existingPath) | Out-Null
+            [System.IO.File]::WriteAllText($existingPath, 'unrelated user file')
+            $errorMessage = ''
+            try { Assert-SafeInstallDirectory $existingPath } catch { $errorMessage = $_.Exception.Message }
+            Assert-True ($errorMessage -like '*must be a regular directory*') "$scriptName accepted a regular file as an installation directory"
+            Assert-True ([System.IO.File]::ReadAllText($existingPath) -eq 'unrelated user file') 'Path validation changed a user file'
+
+            $directoryPath = Join-Path $testDir "$scriptName\Weather Report"
+            New-Item -ItemType Directory -Path $directoryPath | Out-Null
+            Assert-SafeInstallDirectory $directoryPath
+            & {
+                $inspection = @{ Path = $null }
+                function Get-Item {
+                    param($LiteralPath, [switch]$Force, $ErrorAction)
+                    $inspection.Path = $LiteralPath
+                    return [pscustomobject]@{
+                        PSIsContainer = $true
+                        Attributes = [System.IO.FileAttributes]::Directory -bor [System.IO.FileAttributes]::ReparsePoint
+                    }
+                }
+                $errorMessage = ''
+                try { Assert-SafeInstallDirectory $directoryPath } catch { $errorMessage = $_.Exception.Message }
+                Assert-True ($inspection.Path -eq $directoryPath) 'Inspected an unexpected directory'
+                Assert-True ($errorMessage -like '*must be a regular directory*') "$scriptName accepted a linked installation directory"
+            }
         }
     }
 

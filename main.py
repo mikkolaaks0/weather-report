@@ -439,9 +439,8 @@ def _resize_weather_icon_image(image, width: int, height: int):
 
     width = max(1, int(width))
     height = max(1, int(height))
-    resampling = getattr(Image, "Resampling", Image)
     image = _trim_transparent_margins(image)
-    return image.resize((width, height), resampling.LANCZOS)
+    return image.resize((width, height), Image.Resampling.LANCZOS)
 
 
 def build_weather_icon_photo(icon_key: str, width: int, height: int):
@@ -501,7 +500,6 @@ def build_popup_background_image(width: int, height: int, theme: dict):
 
     width = max(1, width)
     height = max(1, height)
-    resampling = getattr(Image, "Resampling", Image)
     scale = 4
     small_w = max(1, width // scale)
     small_h = max(1, height // scale)
@@ -529,7 +527,7 @@ def build_popup_background_image(width: int, height: int, theme: dict):
     draw.ellipse((small_w * 0.12, -small_h * 0.14, small_w * 1.04, small_h * 0.72), fill=(*blob4, 175))
 
     blurred = base.filter(ImageFilter.GaussianBlur(radius=max(4, small_w // 14)))
-    full = blurred.resize((width, height), resampling.LANCZOS)
+    full = blurred.resize((width, height), Image.Resampling.LANCZOS)
     if POPUP_BG_OPACITY < 1.0:
         alpha = full.getchannel("A").point(lambda value: int(value * POPUP_BG_OPACITY))
         full.putalpha(alpha)
@@ -998,7 +996,7 @@ def max_precipitation_probability_next_hours(
     if current_time is None or not times or not probabilities:
         return None
 
-    window_end = current_time + timedelta(hours=hours)
+    interval_limit = timedelta(hours=hours + 1)
     values: list[float] = []
     for time_text, probability in zip(times, probabilities):
         hour_time = _parse_open_meteo_time(time_text)
@@ -1007,8 +1005,8 @@ def max_precipitation_probability_next_hours(
             continue
         try:
             # Open-Meteo timestamps mark the END of the precipitation hour.
-            # Include every hourly interval overlapping the requested window.
-            in_window = current_time < hour_time and hour_time - timedelta(hours=1) < window_end
+            # Compare offsets to avoid overflowing extreme response dates.
+            in_window = timedelta(0) < hour_time - current_time < interval_limit
         except TypeError:
             in_window = False
         if in_window:
@@ -1107,7 +1105,7 @@ def _is_supported_pythonw(path: Path) -> bool:
             [
                 str(path),
                 "-c",
-                "import sys; raise SystemExit(sys.version_info < (3, 10))",
+                "import sys, tkinter; raise SystemExit(sys.version_info < (3, 10))",
             ],
             check=False,
             timeout=5,
@@ -2438,7 +2436,6 @@ class WeatherWidget(tk.Tk):
         self.popup_bg_canvas.itemconfigure(self.clock_label, text=self.clock_var.get())
         self.popup_bg_canvas.coords(self.hero_updated_label, pad + left_nudge, 32)
 
-        self.popup.update_idletasks()
         control_y = 12
         gap = 4
         right = width - pad
@@ -2651,7 +2648,11 @@ class WeatherWidget(tk.Tk):
 
     def _position_widget(self) -> None:
         self._cancel_job("position_job")
+        if self._is_destroying:
+            return
         self.update_idletasks()
+        if self._is_destroying:
+            return
         width = max(322, self.winfo_reqwidth())
         height = max(84, self.winfo_reqheight())
         x_pos = max(0, self.winfo_screenwidth() - width - 20)
@@ -2661,10 +2662,9 @@ class WeatherWidget(tk.Tk):
             self._position_popup()
 
     def _position_popup(self) -> None:
-        if not self.popup:
+        if self._is_destroying or not self.popup:
             return
 
-        self.popup.update_idletasks()
         popup_width = 584
         popup_height = 329
 
@@ -2694,7 +2694,8 @@ class WeatherWidget(tk.Tk):
 
         self.popup.geometry(f"{popup_width}x{popup_height}+{x_pos}+{y_pos}")
         self.popup.update_idletasks()
-        self._apply_popup_round_corners(POPUP_CORNER_RADIUS)
+        if not self._is_destroying:
+            self._apply_popup_round_corners(POPUP_CORNER_RADIUS)
 
     def _tick_clock(self) -> None:
         self._cancel_job("clock_job")
@@ -2925,8 +2926,7 @@ class WeatherWidget(tk.Tk):
             retry_delay = REFRESH_INTERVAL_MS
         self.status_var.set(f"Päivitys epäonnistui: {text} Uusi yritys {retry_delay // 60_000} min kuluttua.")
         self.popup_bg_canvas.itemconfigure(self.hero_updated_label, text="Päivitys epäonnistui")
-        # Keep the last successful weather symbol in tray after transient fetch errors.
-        # Show the bullet only when we do not have any weather data yet.
+        # Keep the last known condition while marking its tooltip as stale.
         if self.latest_weather:
             current = _as_dict(self.latest_weather.get("current"))
             style = resolve_weather_style(current.get("weather_code"), _is_daytime(current.get("is_day")))
@@ -3032,39 +3032,28 @@ class WeatherWidget(tk.Tk):
 
         for index, card in enumerate(self.forecast_cards):
             data_index = index + start_index
-            if data_index >= len(dates):
-                self.popup_bg_canvas.itemconfigure(card["day"], text="-")
-                self.popup_bg_canvas.coords(card["icon"], card.get("center_x", 0), card.get("icon_y", 0))
-                self._configure_canvas_weather_icon(
-                    card["icon"],
-                    "unknown",
-                    FORECAST_ICON_WIDTH,
-                    FORECAST_ICON_HEIGHT,
-                )
-                self.popup_bg_canvas.itemconfigure(card["temp"], text="--° / --°")
-                continue
-
-            forecast_style = resolve_weather_style(
-                code_list[data_index] if data_index < len(code_list) else None,
-                True,
-            )
-            high = format_temperature(t_max[data_index] if data_index < len(t_max) else None, self.unit_symbol)
-            low = format_temperature(t_min[data_index] if data_index < len(t_min) else None, self.unit_symbol)
-            try:
-                day_index = datetime.strptime(dates[data_index], "%Y-%m-%d").weekday()
-                day_label = WEEKDAY_SHORT_FI.get(day_index, "-")
-            except (TypeError, ValueError):
-                day_label = "-"
+            icon_key = "unknown"
+            day_label = "-"
+            temperature_text = "--° / --°"
+            if data_index < len(dates):
+                icon_key = resolve_weather_style(_sequence_item(code_list, data_index)).icon_key
+                high = format_temperature(_sequence_item(t_max, data_index), self.unit_symbol)
+                low = format_temperature(_sequence_item(t_min, data_index), self.unit_symbol)
+                temperature_text = f"{high} / {low}"
+                try:
+                    day_label = WEEKDAY_SHORT_FI[date.fromisoformat(dates[data_index]).weekday()]
+                except (TypeError, ValueError):
+                    pass
 
             self.popup_bg_canvas.itemconfigure(card["day"], text=day_label)
             self.popup_bg_canvas.coords(card["icon"], card.get("center_x", 0), card.get("icon_y", 0))
             self._configure_canvas_weather_icon(
                 card["icon"],
-                forecast_style.icon_key,
+                icon_key,
                 FORECAST_ICON_WIDTH,
                 FORECAST_ICON_HEIGHT,
             )
-            self.popup_bg_canvas.itemconfigure(card["temp"], text=f"{high} / {low}")
+            self.popup_bg_canvas.itemconfigure(card["temp"], text=temperature_text)
 
     def _apply_weather(self, place: dict, weather: dict, requested_city: str) -> None:
         validate_weather_payload(weather)

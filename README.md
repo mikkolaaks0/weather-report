@@ -62,8 +62,10 @@ irm https://raw.githubusercontent.com/mikkolaaks0/weather-report/main/install.ps
 Useful flags are `-Startup`, `-NoDesktopShortcut`, `-NoStartMenuShortcut`, and
 `-NoLaunch`. A custom `-InstallDir` must point to an app-specific
 `WeatherReport` folder; the installer refuses broad user, AppData, Programs, or
-drive-root paths before replacing an existing install. On updates, an existing
-startup shortcut is preserved and rewritten to the current executable path.
+drive-root paths before replacing an existing install. An existing target must
+be a regular directory, not a file, symbolic link, or junction; the uninstaller
+applies the same check. On updates, an existing startup shortcut is preserved
+and rewritten to the current executable path.
 Downloads have time limits, and the installer stops only the executable inside
 the installation being replaced. An app that exits during that stop is treated
 as already stopped; real termination failures still abort the operation.
@@ -115,6 +117,8 @@ an unrelated lookup finishes; its stale result cannot replace the selection.
 The popup clock runs only while the card is open and updates immediately on reopening.
 Closing the app during a popup refresh error also cancels the pending popup
 opening, so it cannot access an already destroyed window.
+Popup layout does not run unrelated idle callbacks. Window positioning also
+stops if the app is closed while Tk is settling pending geometry changes.
 After confirmation, switching windows or hiding the popup does not cancel the
 search or let its completion steal keyboard focus. Escape or editing the query
 still cancels a pending suggestion selection. If a confirmed location's weather
@@ -227,6 +231,9 @@ Coverage includes:
   location-midnight refreshes, and closing during update/restart confirmations.
 - Popup clock start/stop, unchanged dropdown layout, release draft retries, and
   protection against replacing published release assets.
+- Closing during window positioning, stable popup control geometry, datetime
+  limits in hourly data, incomplete forecasts, Tk-less interpreter rejection,
+  and refusing installation over files or linked directories.
 
 Windows tests render a hidden popup and inspect temporary `.lnk` files. Git tests
 use local repositories without contacting GitHub. Installer and launcher tests

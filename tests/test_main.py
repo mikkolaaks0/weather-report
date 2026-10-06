@@ -204,6 +204,28 @@ class DataFormattingTests(unittest.TestCase):
         self.assertEqual(main.format_city({"name": "Espoo", "admin1": " "}), "Espoo")
         self.assertEqual(main.format_city(None), "-")
 
+    def test_rain_probability_handles_datetime_limits_without_overflow(self) -> None:
+        for current, following in (
+            ("9999-12-31T23:00", "9999-12-31T23:30"),
+            ("0001-01-01T00:00", "0001-01-01T00:30"),
+        ):
+            with self.subTest(current=current):
+                weather = {
+                    "current": {"time": current},
+                    "hourly": {"time": [current, following], "precipitation_probability": [99, 25]},
+                }
+                self.assertEqual(main.max_precipitation_probability_next_hours(weather), 25)
+
+    def test_rain_probability_ignores_mixed_timezone_formats(self) -> None:
+        weather = {
+            "current": {"time": "2026-10-06T12:00+03:00"},
+            "hourly": {
+                "time": ["2026-10-06T13:00", "2026-10-06T10:00Z", "2026-10-06T16:00Z"],
+                "precipitation_probability": [100, 25, 99],
+            },
+        }
+        self.assertEqual(main.max_precipitation_probability_next_hours(weather), 25)
+
 
 class ServicePayloadTests(unittest.TestCase):
     def test_forecast_dates_reject_invalid_disordered_or_mismatched_days(self) -> None:
@@ -626,6 +648,17 @@ class SettingsAndShortcutTests(unittest.TestCase):
             timeout = subprocess.TimeoutExpired([str(pythonw)], 5)
             with patch.object(main.subprocess, "run", side_effect=timeout):
                 self.assertFalse(main._is_supported_pythonw(pythonw))
+
+    def test_pythonw_probe_rejects_an_interpreter_without_tkinter(self) -> None:
+        run = subprocess.run
+        with tempfile.TemporaryDirectory() as directory:
+            def isolated_probe(*args, **kwargs):
+                return run(*args, cwd=directory, capture_output=True, **kwargs)
+
+            with patch.object(main.subprocess, "run", side_effect=isolated_probe):
+                self.assertTrue(main._is_supported_pythonw(Path(sys.executable)))
+                (Path(directory) / "tkinter.py").write_text("raise ImportError('Tk unavailable')\n", encoding="utf-8")
+                self.assertFalse(main._is_supported_pythonw(Path(sys.executable)))
 
     def test_shortcut_creation_uses_noninteractive_powershell(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

@@ -84,6 +84,12 @@ function Assert-SafeInstallDirectory {
             throw "Refusing to install directly into unsafe path: $fullPath"
         }
     }
+    if (Test-Path -LiteralPath $fullPath) {
+        $existing = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+        if (-not $existing.PSIsContainer -or ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            throw "Install path must be a regular directory, not a file or link: $fullPath"
+        }
+    }
 }
 
 function Stop-InstalledApplication {

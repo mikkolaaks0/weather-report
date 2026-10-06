@@ -217,6 +217,20 @@ class TimerLifecycleTests(unittest.TestCase):
         self.assertGreaterEqual(width, widget.winfo_reqwidth())
         self.assertGreaterEqual(height, widget.winfo_reqheight())
 
+    def test_fallback_positioning_stops_when_an_idle_callback_closes_the_app(self) -> None:
+        widget = self.widget
+        widget.after_idle(widget.destroy)
+        widget._position_widget()
+        self.assertTrue(widget._is_destroying)
+        widget._position_widget()
+
+    def test_popup_positioning_stops_when_an_idle_callback_closes_the_app(self) -> None:
+        widget = self.widget
+        widget.after_idle(widget.destroy)
+        widget._position_popup()
+        self.assertTrue(widget._is_destroying)
+        widget._position_popup()
+
     def test_fallback_window_resizes_after_a_long_city_refresh(self) -> None:
         widget = self.widget
         widget._position_widget()
@@ -261,6 +275,36 @@ class TimerLifecycleTests(unittest.TestCase):
         finally:
             widget.after_cancel(job)
 
+    def test_full_popup_layout_does_not_process_unrelated_idle_callbacks(self) -> None:
+        widget = self.widget
+        idle_callback = Mock()
+        job = widget.after_idle(idle_callback)
+        try:
+            widget._layout_popup_content(584, 329)
+            idle_callback.assert_not_called()
+        finally:
+            widget.after_cancel(job)
+
+    def test_popup_controls_have_stable_nonoverlapping_geometry_on_first_layout(self) -> None:
+        widget = self.widget
+        canvas = widget.popup_bg_canvas
+        controls = (
+            widget.location_entry_window, widget.search_button_window,
+            widget.refresh_button_window, widget.close_button_window,
+        )
+        widget._layout_popup_content(584, 329)
+        bounds = [canvas.bbox(item) for item in controls]
+        self.assertGreater(bounds[0][2] - bounds[0][0], 100)
+        for left, right in zip(bounds, bounds[1:]):
+            self.assertLess(left[2], right[0])
+        for x1, y1, x2, y2 in bounds:
+            self.assertGreater(x2 - x1, 1)
+            self.assertEqual(y1, 12)
+            self.assertEqual(y2 - y1, main.POPUP_CONTROL_HEIGHT)
+        widget.update_idletasks()
+        widget._layout_popup_content(584, 329)
+        self.assertEqual(bounds, [canvas.bbox(item) for item in controls])
+
     def test_city_measurements_use_the_same_font_as_the_rendered_label(self) -> None:
         widget = self.widget
         canvas = widget.popup_bg_canvas
@@ -270,6 +314,36 @@ class TimerLifecycleTests(unittest.TestCase):
             widget.city_label_font.configure(size=size)
             widget._layout_popup_content(450, 329)
             self.assertLess(canvas.bbox(widget.hero_city_label)[2], canvas.bbox(widget.today_condition_label)[0])
+
+    def test_shorter_forecast_clears_old_cards_and_keeps_their_geometry(self) -> None:
+        widget = self.widget
+        widget._layout_popup_content(584, 329)
+        canvas = widget.popup_bg_canvas
+        daily = {
+            "time": [f"2026-10-{day:02}" for day in range(6, 13)],
+            "weather_code": [0] * 7,
+            "temperature_2m_max": [20] * 7,
+            "temperature_2m_min": [10] * 7,
+        }
+        widget._apply_forecast_cards(daily)
+        before = [canvas.coords(card["icon"]) for card in widget.forecast_cards]
+        unknown = widget._weather_icon_photo("unknown", 43, 39)
+        for unit in ("C", "F"):
+            widget.unit_symbol = unit
+            with self.subTest(unit=unit):
+                widget._apply_forecast_cards({"time": daily["time"][:2]})
+                for index, card in enumerate(widget.forecast_cards):
+                    self.assertEqual(canvas.coords(card["icon"]), before[index])
+                    self.assertEqual(canvas.itemcget(card["icon"], "image"), str(unknown))
+                    expected_day = main.WEEKDAY_SHORT_FI[main.date(2026, 10, 7).weekday()] if index == 0 else "-"
+                    self.assertEqual(canvas.itemcget(card["day"], "text"), expected_day)
+                    expected_temp = (
+                        f"-\N{DEGREE SIGN}{unit} / -\N{DEGREE SIGN}{unit}" if index == 0
+                        else "--\N{DEGREE SIGN} / --\N{DEGREE SIGN}"
+                    )
+                    self.assertEqual(canvas.itemcget(card["temp"], "text"), expected_temp)
+        widget._apply_forecast_cards({})
+        self.assertTrue(all(canvas.itemcget(card["day"], "text") == "-" for card in widget.forecast_cards))
 
 
 @unittest.skipUnless(os.name == "nt" and main.ImageTk is not None, "Windows Tk/Pillow smoke test")
