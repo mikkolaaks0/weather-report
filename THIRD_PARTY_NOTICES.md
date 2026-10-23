@@ -16,6 +16,11 @@ This project uses third-party services and libraries.
 - Project: https://github.com/python-pillow/Pillow
 - License file: https://github.com/python-pillow/Pillow/blob/main/LICENSE
 
+## Certifi (HTTPS CA certificates)
+- Project: https://github.com/certifi/python-certifi
+- License: MPL-2.0
+- License file: https://github.com/certifi/python-certifi/blob/master/LICENSE
+
 ## Exo 2
 - Project: https://github.com/NDISCOVER/Exo-2.0
 - License: SIL Open Font License 1.1

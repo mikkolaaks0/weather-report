@@ -145,6 +145,54 @@ class TimerLifecycleTests(unittest.TestCase):
         widget.destroy()
         self.assertFalse(pending.intersection(widget.tk.call("after", "info")))
 
+    def test_modal_ui_callback_keeps_dispatching_queued_actions(self) -> None:
+        widget = self.widget
+        finished = main.tk.BooleanVar(widget, value=False)
+        events = []
+
+        def queued_action():
+            events.append("queued action")
+            finished.set(True)
+
+        def modal_callback():
+            timeout = widget.after(1000, lambda: finished.set(True))
+            widget.after(0, lambda: widget._ui_callbacks.put(queued_action))
+            try:
+                # Like a message box, this keeps Tk events running while the
+                # callback itself has not returned to the dispatcher.
+                widget.wait_variable(finished)
+            finally:
+                widget.after_cancel(timeout)
+            events.append("modal callback returned")
+
+        widget._ui_callbacks.put(modal_callback)
+        widget._drain_ui_callbacks()
+        self.assertEqual(events, ["queued action", "modal callback returned"])
+
+    def test_manual_dispatch_keeps_only_one_poll_timer(self) -> None:
+        widget = self.widget
+        for _ in range(3):
+            previous_job = widget.ui_poll_job
+            widget._drain_ui_callbacks()
+            pending = widget.tk.call("after", "info")
+            self.assertNotIn(previous_job, pending)
+            self.assertIn(widget.ui_poll_job, pending)
+            poll_jobs = [
+                job for job in pending
+                if "_drain_ui_callbacks" in str(widget.tk.call("after", "info", job))
+            ]
+            self.assertEqual(poll_jobs, [widget.ui_poll_job])
+
+    def test_queued_destroy_cancels_the_next_dispatch_poll(self) -> None:
+        widget = self.widget
+        pending = set(widget.tk.call("after", "info"))
+        widget._ui_callbacks.put(widget.destroy)
+        widget._drain_ui_callbacks()
+        self.assertTrue(widget._is_destroying)
+        self.assertIsNone(widget.ui_poll_job)
+        self.assertFalse(pending.intersection(widget.tk.call("after", "info")))
+        self.assertFalse(widget.tk.call("after", "info"))
+
     def test_hidden_popup_does_not_schedule_clock_updates(self) -> None:
         widget = self.widget
         self.assertIsNone(widget.clock_job)

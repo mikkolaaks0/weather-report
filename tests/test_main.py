@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import re
+import ssl
 import sys
 import subprocess
 import tempfile
@@ -135,6 +136,14 @@ class WeatherStyleTests(unittest.TestCase):
 
 
 class DataFormattingTests(unittest.TestCase):
+    def test_wind_direction_rejects_values_outside_a_full_turn(self) -> None:
+        for value in (-90, -1, 360.1, 450):
+            with self.subTest(value=value):
+                self.assertEqual(main.format_wind_direction(value), "-")
+        for value, expected in ((0, "pohjoinen"), (90, "itä"), (180, "etelä"), (360, "pohjoinen")):
+            with self.subTest(value=value):
+                self.assertEqual(main.format_wind_direction(value), expected)
+
     def test_metrics_reject_impossible_ranges_and_do_not_show_negative_zero(self) -> None:
         for invalid in (-1, 101, float("nan"), "bad", True):
             self.assertEqual(main.format_metric(invalid, "%", minimum=0, maximum=100), "-")
@@ -225,6 +234,77 @@ class DataFormattingTests(unittest.TestCase):
             },
         }
         self.assertEqual(main.max_precipitation_probability_next_hours(weather), 25)
+
+
+class HTTPSClientSecurityTests(unittest.TestCase):
+    def test_https_context_uses_only_the_bundled_ca_store(self) -> None:
+        expected = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        expected.load_verify_locations(cafile=main.certifi.where())
+        with (
+            patch.dict(os.environ, {
+                "SSL_CERT_FILE": str(main.PROJECT_DIR / "missing-ca.pem"),
+                "SSL_CERT_DIR": str(main.PROJECT_DIR / "missing-ca-directory"),
+            }),
+            patch.object(ssl.SSLContext, "load_default_certs", side_effect=AssertionError("system trust used")),
+        ):
+            context = main._create_https_context()
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+        self.assertTrue(context.get_ca_certs())
+        self.assertEqual(
+            set(context.get_ca_certs(binary_form=True)),
+            set(expected.get_ca_certs(binary_form=True)),
+        )
+
+    def test_missing_old_or_invalid_certifi_blocks_requests(self) -> None:
+        packages = (
+            None,
+            Mock(__version__="2026.10.18"),
+            Mock(__version__="2026.9.1"),
+            Mock(__version__="invalid"),
+            Mock(__version__=None),
+            Mock(__version__="2026.10"),
+        )
+        for package in packages:
+            with (
+                self.subTest(version=getattr(package, "__version__", None)),
+                patch.object(main, "certifi", package),
+                patch.object(main, "urlopen") as open_url,
+                self.assertRaisesRegex(main.WeatherServiceError, "HTTPS-varmenteet"),
+            ):
+                main._get_json("https://example.invalid", {})
+            open_url.assert_not_called()
+
+    def test_missing_or_corrupt_bundle_never_falls_back_to_default_trust(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            corrupt = Path(directory) / "corrupt.pem"
+            corrupt.write_text("not a CA bundle", encoding="ascii")
+            for bundle in (None, "", str(Path(directory) / "missing.pem"), str(corrupt)):
+                package = Mock(__version__="2026.10.19", where=Mock(return_value=bundle))
+                with (
+                    self.subTest(bundle=bundle),
+                    patch.object(main, "certifi", package),
+                    patch.object(main, "urlopen") as open_url,
+                    self.assertRaisesRegex(main.WeatherServiceError, "HTTPS-varmenteita"),
+                ):
+                    main._get_json("https://example.invalid", {})
+                open_url.assert_not_called()
+
+    def test_certificate_rejection_fails_without_retry_or_weaker_trust(self) -> None:
+        certificate_error = ssl.SSLCertVerificationError(1, "certificate verify failed")
+        with (
+            patch.object(main, "urlopen", side_effect=URLError(certificate_error)) as open_url,
+            patch.object(main.time, "sleep") as sleep,
+        ):
+            with self.assertRaises(URLError) as raised:
+                main._request_with_retry(lambda: main._get_json("https://example.invalid", {}))
+        self.assertIs(raised.exception.reason, certificate_error)
+        self.assertEqual(open_url.call_count, 1)
+        sleep.assert_not_called()
+        for call in open_url.call_args_list:
+            context = call.kwargs["context"]
+            self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+            self.assertTrue(context.check_hostname)
 
 
 class ServicePayloadTests(unittest.TestCase):
@@ -342,6 +422,10 @@ class ServicePayloadTests(unittest.TestCase):
         request = mocked_open.call_args.args[0]
         self.assertEqual(request.get_header("Accept"), "application/json")
         self.assertEqual(request.get_header("User-agent"), f"{main.APP_SLUG}-desktop")
+        context = mocked_open.call_args.kwargs["context"]
+        self.assertIsInstance(context, ssl.SSLContext)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
 
         invalid_payloads = (
             b"[]",
@@ -1299,6 +1383,23 @@ class UpdateLifecycleTests(unittest.TestCase):
 
 
 class WeatherResultTests(unittest.TestCase):
+    def test_certificate_failure_is_distinguished_from_an_offline_connection(self) -> None:
+        place = {"name": "Espoo", "latitude": 60.2, "longitude": 24.65}
+        for reason, expected in (
+            (ssl.SSLCertVerificationError(1, "certificate verify failed"), "HTTPS-varmennetta"),
+            ("offline", "internet-yhteys"),
+        ):
+            with self.subTest(reason=type(reason).__name__):
+                widget = object.__new__(main.WeatherWidget)
+                widget._call_on_ui_thread = lambda callback: callback()
+                widget._show_error = Mock()
+                with (
+                    patch.object(main, "get_weather", side_effect=URLError(reason)),
+                    patch.object(main.time, "sleep"),
+                ):
+                    widget._fetch_worker("Espoo", "celsius", place)
+                self.assertIn(expected, widget._show_error.call_args.args[0])
+
     @staticmethod
     def make_result_widget(entry: str = "Espoo"):
         widget = object.__new__(main.WeatherWidget)

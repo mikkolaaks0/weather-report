@@ -7,6 +7,21 @@ from tkinter import font as tkfont
 from typing import Callable
 
 
+def fit_text(text: str, max_width: int, measure: Callable[[str], int]) -> str:
+    """Fit a label without assuming shaped Unicode prefixes grow in width."""
+    if not text or max_width <= 0:
+        return ""
+    if measure(text) <= max_width:
+        return text
+    suffix = "..."
+    if measure(suffix) > max_width:
+        return ""
+    text = text[:-1]
+    while text and measure(text + suffix) > max_width:
+        text = text[:-1]
+    return text + suffix
+
+
 class CitySearch(tk.Frame):
     LIMIT = 5
     DEBOUNCE_MS = 300
@@ -51,6 +66,8 @@ class CitySearch(tk.Frame):
             self, font=font, bg=background, fg="#B6D0DE", anchor="w", padx=8, pady=6,
         )
         self.row_font = tkfont.Font(self, font=font)
+        self._fitted_labels_key = None
+        self._fitted_labels: tuple[str, ...] = ()
         self.trace_id = variable.trace_add("write", self._changed)
         entry.bind("<Return>", self.confirm)
         entry.bind("<KP_Enter>", self.confirm)
@@ -235,15 +252,15 @@ class CitySearch(tk.Frame):
         y = self.entry.winfo_rooty() - parent.winfo_rooty() + self.entry.winfo_height() + 3
         self.place(x=x, y=y, width=width)
         self.lift()
-        labels = []
-        for place in self.rows:
-            label = self._label(place)
-            if self.row_font.measure(label) > width - 18:
-                while label and self.row_font.measure(label + "...") > width - 18:
-                    label = label[:-1]
-                label += "..."
-            labels.append(label)
-        if tuple(labels) == self.listbox.get(0, "end"):
+        full_labels = tuple(self._label(place) for place in self.rows)
+        label_key = (width, full_labels, self.row_font.actual(), self.tk.call("tk", "scaling"))
+        if label_key != self._fitted_labels_key:
+            self._fitted_labels = tuple(
+                fit_text(label, width - 18, self.row_font.measure) for label in full_labels
+            )
+            self._fitted_labels_key = label_key
+        labels = self._fitted_labels
+        if labels == self.listbox.get(0, "end"):
             return
         selection = self.listbox.curselection()
         self.listbox.delete(0, "end")

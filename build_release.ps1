@@ -19,7 +19,37 @@ function Resolve-BuildVersion {
     return $metadata.version
 }
 
+function Test-BuildPython {
+    param([hashtable]$Python)
+
+    try {
+        & $Python.Command @($Python.Args + @(
+            '-c',
+            'import sys, tkinter; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'
+        )) 2>$null
+        return $LASTEXITCODE -eq 0
+    }
+    catch {
+        return $false
+    }
+}
+
 function Resolve-PythonCommand {
+    param([Parameter(Mandatory = $true)][string]$ProjectDirectory)
+
+    $venvDirectory = Join-Path $ProjectDirectory '.venv'
+    if (Test-Path -LiteralPath $venvDirectory) {
+        $venvPython = Join-Path $venvDirectory 'Scripts\python.exe'
+        $candidate = @{ Command = $venvPython; Args = @() }
+        if (
+            -not (Test-Path -LiteralPath $venvPython -PathType Leaf) -or
+            -not (Test-BuildPython -Python $candidate)
+        ) {
+            throw 'The project .venv is unusable. Recreate it with Python 3.10+ and Tkinter before building.'
+        }
+        return $candidate
+    }
+
     $candidates = @(
         @{ Command = 'py'; Args = @('-3') },
         @{ Command = 'python'; Args = @() },
@@ -28,18 +58,12 @@ function Resolve-PythonCommand {
 
     foreach ($candidate in $candidates) {
         $commandInfo = Get-Command $candidate.Command -ErrorAction SilentlyContinue
-        if ($commandInfo) {
-            & $candidate.Command @($candidate.Args + @(
-                '-c',
-                'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'
-            ))
-            if ($LASTEXITCODE -eq 0) {
-                return $candidate
-            }
+        if ($commandInfo -and (Test-BuildPython -Python $candidate)) {
+            return $candidate
         }
     }
 
-    throw 'Python was not found. Install Python 3.10+ and make sure py or python works from the command line.'
+    throw 'Python 3.10+ with Tkinter was not found. Create a project .venv or make sure py or python works from the command line.'
 }
 
 function Invoke-Python {
@@ -75,7 +99,7 @@ Set-Location $root
 
 $normalizedVersion = Resolve-BuildVersion -MetadataPath (Join-Path $root 'app_metadata.json') -RequestedVersion $Version
 
-$python = Resolve-PythonCommand
+$python = Resolve-PythonCommand -ProjectDirectory $root
 Invoke-Python -Python $python -Arguments @('-m', 'pip', 'install', '-r', 'requirements.txt')
 
 Write-Host 'Running tests...'
@@ -90,6 +114,7 @@ $distExe = Join-Path $distDir 'WeatherReport.exe'
 $requiredBuildPaths = @(
     $distExe,
     (Join-Path $distDir '_internal\app_metadata.json'),
+    (Join-Path $distDir '_internal\certifi\cacert.pem'),
     (Join-Path $distDir '_internal\assets\weather-icons\unknown.png'),
     (Join-Path $distDir '_internal\assets\metric-icons\wind.png'),
     (Join-Path $distDir '_internal\assets\fonts\Exo2-Regular.ttf')

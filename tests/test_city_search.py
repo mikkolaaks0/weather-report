@@ -7,12 +7,28 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import main
-from city_search import CitySearch
+from city_search import CitySearch, fit_text
 
 
 def place(name="Helsinki", latitude=60.17, longitude=24.94):
     return {"name": name, "latitude": latitude, "longitude": longitude,
             "admin1": "Uusimaa", "country": "Suomi"}
+
+
+class TextFittingTests(unittest.TestCase):
+    def test_text_fitting_handles_empty_exact_and_too_narrow_labels(self):
+        for text, width, expected in (
+            ("", 20, ""), ("Helsinki", 0, ""), ("Helsinki", -1, ""),
+            ("Helsinki", 8, "Helsinki"), ("Helsinki", 2, ""),
+            ("Helsinki", 5, "He..."), ("Äänekoski", 6, "Ään..."),
+        ):
+            with self.subTest(text=text, width=width):
+                self.assertEqual(fit_text(text, width, len), expected)
+
+    def test_shaped_prefixes_need_not_increase_monotonically(self):
+        # Shaping can make a longer prefix narrower, as with Arabic ligatures.
+        widths = {"abc": 30, "ab...": 12, "a...": 20, "...": 5}
+        self.assertEqual(fit_text("abc", 12, widths.__getitem__), "ab...")
 
 
 class LocationSearchTests(unittest.TestCase):
@@ -262,20 +278,23 @@ class AutocompleteTests(unittest.TestCase):
         self.assertFalse(self.control.inflight)
 
     def test_unchanged_layout_preserves_rows_selection_and_scroll_position(self):
-        self.results_for()
-        self.control._select(1)
-        self.control.listbox.xview_moveto(0.25)
-        scroll = self.control.listbox.xview()
-        with (
-            patch.object(self.control.listbox, "delete", wraps=self.control.listbox.delete) as delete,
-            patch.object(self.control.listbox, "insert", wraps=self.control.listbox.insert) as insert,
-            patch.object(self.control, "_select", wraps=self.control._select) as select,
-        ):
-            for _ in range(5):
-                self.control.reposition()
-            delete.assert_not_called()
-            insert.assert_not_called()
-            select.assert_not_called()
+        with patch.object(self.canvas, "winfo_width", return_value=400):
+            self.results_for()
+            self.control._select(1)
+            self.control.listbox.xview_moveto(0.25)
+            scroll = self.control.listbox.xview()
+            with (
+                patch.object(self.control.listbox, "delete", wraps=self.control.listbox.delete) as delete,
+                patch.object(self.control.listbox, "insert", wraps=self.control.listbox.insert) as insert,
+                patch.object(self.control, "_select", wraps=self.control._select) as select,
+                patch.object(self.control.row_font, "measure", wraps=self.control.row_font.measure) as measure,
+            ):
+                for _ in range(5):
+                    self.control.reposition()
+                delete.assert_not_called()
+                insert.assert_not_called()
+                select.assert_not_called()
+                measure.assert_not_called()
         self.assertEqual(self.control.listbox.curselection(), (1,))
         self.assertEqual(self.control.listbox.index("active"), 1)
         self.assertEqual(self.control.listbox.xview(), scroll)
@@ -294,6 +313,22 @@ class AutocompleteTests(unittest.TestCase):
         self.assertEqual(self.control.listbox.curselection(), (1,))
         self.control.confirm()
         self.submit.assert_called_once_with("Helsingborg", place("Helsingborg"))
+
+    def test_labels_never_overflow_a_dropdown_too_narrow_for_the_ellipsis(self):
+        self.results_for()
+        with patch.object(self.canvas, "winfo_width", return_value=20):
+            self.control.reposition()
+        self.assertEqual(self.control.listbox.get(0, "end"), ("", ""))
+        self.control.confirm()
+        self.submit.assert_called_once_with("Helsinki", place())
+
+    def test_font_changes_invalidate_fitted_label_cache(self):
+        with patch.object(self.canvas, "winfo_width", return_value=400):
+            self.results_for()
+            self.control.row_font.configure(size=20)
+            with patch.object(self.control.row_font, "measure", wraps=self.control.row_font.measure) as measure:
+                self.control.reposition()
+            self.assertGreater(measure.call_count, 0)
 
     def test_edit_state_is_kept_until_confirmation_finishes(self):
         self.assertFalse(self.control.editing)

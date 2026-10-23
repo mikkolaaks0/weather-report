@@ -114,6 +114,9 @@ lookups are not cached, and the cache is not written to disk. Moving the dropdow
 without changing its labels preserves its rows and selection without rebuilding it.
 Cached suggestions and Enter confirmation remain immediately available while
 an unrelated lookup finishes; its stale result cannot replace the selection.
+Repeated dropdown layouts reuse fitted labels until the text, width, font, or
+display scaling changes. Text fitting preserves Unicode shaping and never
+draws an ellipsis wider than the available space.
 The popup clock runs only while the card is open and updates immediately on reopening.
 Closing the app during a popup refresh error also cancels the pending popup
 opening, so it cannot access an already destroyed window.
@@ -134,15 +137,32 @@ even if the previous request completed less than 15 minutes ago. This uses the
 location's UTC offset from Open-Meteo, not the computer's date.
 Unknown names return refresh to the previous location and its normal interval
 when a previous forecast exists. Impossible optional values (such as humidity
-above 100% or negative wind speed) display as missing without hiding valid
+above 100%, negative wind speed, or wind directions outside 0–360 degrees) display as missing without hiding valid
 weather data. A missing sun-event time is never presented as midnight.
 Suggestions use the existing Open-Meteo geocoding service, with no location
 permission or additional dependencies. See its [matching rules](https://open-meteo.com/en/docs/geocoding-api).
 
 ```powershell
-python -m pip install -r requirements.txt
-python .\main.py
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe .\main.py
 ```
+
+Weather and city searches verify HTTPS certificates using Certifi's CA bundle
+(`certifi>=2026.10.19`, the eMudhra/emSign incident fix). They do not merge the
+Windows certificate store or `SSL_CERT_FILE` / `SSL_CERT_DIR` overrides into this
+bundle. Certificate verification and hostname checks remain enabled. Networks
+that require a private CA for TLS inspection are not supported by this policy.
+If the bundle is missing, outdated, or unreadable, requests fail closed and the
+app displays a dependency error instead of falling back to system certificates.
+After updating a source installation, rerun `python -m pip install -r requirements.txt`
+with the interpreter used to launch the app, then restart it. Source self-updates
+do not install dependencies. For a project virtual environment, use
+`.\.venv\Scripts\python.exe -m pip install -r requirements.txt`.
+Packaged releases include the bundle; existing EXE installations need a rebuilt
+release to receive this code and certificate update.
+Certificate verification failures are not retried as transient network errors,
+and the weather view identifies them separately from an offline connection.
 
 For a windowless launch, use:
 
@@ -174,6 +194,12 @@ Already-correct startup links are left unchanged, avoiding an unnecessary second
 PowerShell process and disk write. Legacy links and stale link fields are still repaired.
 
 ## Build
+
+The build uses the project's `.venv\Scripts\python.exe` when `.venv` exists,
+matching the source launcher. It checks Python 3.10+ and Tkinter before installing
+build dependencies. A broken project environment stops the build with a clear
+error instead of installing into another Python environment. When `.venv` is
+absent, the existing `py`, `python`, and `python3` fallbacks remain available.
 
 Create a portable release package:
 

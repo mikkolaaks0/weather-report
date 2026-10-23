@@ -314,6 +314,44 @@ try {
     }
 
     & {
+        . (Get-ScriptFunctions 'build_release.ps1')
+        $projectDirectory = Join-Path $testDir 'build python [literal]'
+        New-Item -ItemType Directory -Path $projectDirectory | Out-Null
+
+        # A clean checkout can still use an installed interpreter without creating a venv.
+        $fallback = Resolve-PythonCommand -ProjectDirectory $projectDirectory
+        Assert-True ($fallback.Command -in @('py', 'python', 'python3')) 'Build fallback selected an unexpected interpreter'
+        $venvDirectory = Join-Path $projectDirectory '.venv'
+        Assert-True (-not (Test-Path -LiteralPath $venvDirectory)) 'Interpreter discovery created a virtual environment'
+
+        # No dependencies are installed: use a real temporary venv to check selection and Tk imports.
+        Invoke-Python -Python $fallback -Arguments @('-m', 'venv', '--without-pip', $venvDirectory)
+        $venvPython = Join-Path $venvDirectory 'Scripts\python.exe'
+        Push-Location -LiteralPath $projectDirectory
+        try {
+            & {
+                function Get-Command { throw 'Project builds must not inspect global Python when .venv exists' }
+                $selected = Resolve-PythonCommand -ProjectDirectory $projectDirectory
+                Assert-True ($selected.Command -eq $venvPython -and $selected.Args.Count -eq 0) 'Build did not prefer the project virtual environment'
+
+                [System.IO.File]::WriteAllText((Join-Path $projectDirectory 'tkinter.py'), "raise ImportError('simulated unavailable Tkinter')`n")
+                $errorMessage = ''
+                try { Resolve-PythonCommand -ProjectDirectory $projectDirectory }
+                catch { $errorMessage = $_.Exception.Message }
+                Assert-True ($errorMessage -like '*project .venv is unusable*') 'Build accepted a venv without Tkinter or fell back to global Python'
+
+                $brokenProject = Join-Path $testDir 'broken build environment'
+                New-Item -ItemType Directory -Path (Join-Path $brokenProject '.venv') | Out-Null
+                $errorMessage = ''
+                try { Resolve-PythonCommand -ProjectDirectory $brokenProject }
+                catch { $errorMessage = $_.Exception.Message }
+                Assert-True ($errorMessage -like '*project .venv is unusable*') 'Build fell back to global Python for an incomplete venv'
+            }
+        }
+        finally { Pop-Location }
+    }
+
+    & {
         . (Get-ScriptFunctions 'install.ps1')
         $downloadDir = Join-Path $testDir 'checksums [literal]'
         New-Item -ItemType Directory -Path $downloadDir | Out-Null

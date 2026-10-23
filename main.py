@@ -6,6 +6,7 @@ import ntpath
 import os
 import queue
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,14 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from city_search import CitySearch
+from city_search import CitySearch, fit_text
+
+try:
+    import certifi
+except ImportError:
+    # A source update may precede dependency installation. Keep the UI usable,
+    # but never send a weather request with the old system trust store.
+    certifi = None
 
 try:
     import pystray
@@ -55,6 +63,7 @@ WEATHER_RETRY_DELAYS_MS = (60_000, 120_000, 300_000)
 FRESH_WEATHER_MAX_AGE_MINUTES = 15
 UPDATE_CHECK_DELAY_MS = 10 * 1000
 MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
+MIN_CERTIFI_VERSION = (2026, 10, 19)
 MAX_SETTINGS_BYTES = 64 * 1024
 MAX_CITY_QUERY_LENGTH = 120
 TRAY_TOOLTIP_MAX_UTF16_UNITS = 127
@@ -616,6 +625,31 @@ def save_settings(settings: dict) -> bool:
         return False
 
 
+def _create_https_context() -> ssl.SSLContext:
+    try:
+        version = tuple(int(part) for part in getattr(certifi, "__version__", "").split("."))
+    except (AttributeError, ValueError):
+        version = ()
+    if len(version) != 3 or version < MIN_CERTIFI_VERSION:
+        raise WeatherServiceError(
+            "HTTPS-varmenteet puuttuvat tai ovat vanhentuneet. Päivitä sovelluksen riippuvuudet."
+        )
+
+    try:
+        ca_bundle = certifi.where()
+        if not ca_bundle:
+            raise OSError("CA bundle is missing")
+        # Passing cafile directly avoids merging Windows/environment CA stores
+        # that can still trust the compromised eMudhra/emSign certificates.
+        context = ssl.create_default_context(cafile=ca_bundle)
+        context.set_alpn_protocols(["http/1.1"])
+        return context
+    except (OSError, ValueError) as error:
+        raise WeatherServiceError(
+            "HTTPS-varmenteita ei voitu ladata. Päivitä sovelluksen riippuvuudet."
+        ) from error
+
+
 def _get_json(url: str, params: dict) -> dict:
     query = urlencode(params)
     request = Request(
@@ -626,7 +660,7 @@ def _get_json(url: str, params: dict) -> dict:
         },
     )
     try:
-        with urlopen(request, timeout=12) as response:
+        with urlopen(request, timeout=12, context=_create_https_context()) as response:
             raw_payload = response.read(MAX_JSON_RESPONSE_BYTES + 1)
             charset = response.headers.get_content_charset() or "utf-8"
     except HTTPError as error:
@@ -730,6 +764,10 @@ def get_weather(latitude: float, longitude: float, temperature_unit: str = "cels
     )
 
 
+def _is_certificate_error(error: BaseException) -> bool:
+    return isinstance(error, URLError) and isinstance(error.reason, ssl.SSLCertVerificationError)
+
+
 def _request_with_retry(
     operation: Callable[[], dict],
     attempts: int = 2,
@@ -744,8 +782,8 @@ def _request_with_retry(
             retryable = error.code in {408, 425, 429} or error.code >= 500
             if not retryable or attempt == attempts - 1:
                 raise
-        except (URLError, TimeoutError, ConnectionError, IncompleteRead):
-            if attempt == attempts - 1:
+        except (URLError, TimeoutError, ConnectionError, IncompleteRead) as error:
+            if _is_certificate_error(error) or attempt == attempts - 1:
                 raise
         time.sleep(max(0.0, retry_delay_seconds))
 
@@ -929,7 +967,7 @@ def format_metric(
 
 def format_wind_direction(value: object) -> str:
     number = _coerce_number(value)
-    if number is None:
+    if number is None or not 0 <= number <= 360:
         return "-"
 
     directions = [
@@ -1931,10 +1969,13 @@ class WeatherWidget(tk.Tk):
         self._ui_callbacks.put(callback)
 
     def _drain_ui_callbacks(self) -> None:
-        self.ui_poll_job = None
+        self._cancel_job("ui_poll_job")
         if self._is_destroying:
             return
 
+        # Modal dialogs run a nested Tk event loop. Keep dispatch alive while a
+        # callback is waiting for one, including tray actions such as Quit.
+        self.ui_poll_job = self.after(50, self._drain_ui_callbacks)
         for _ in range(100):
             try:
                 callback = self._ui_callbacks.get_nowait()
@@ -1946,9 +1987,6 @@ class WeatherWidget(tk.Tk):
                 self.report_callback_exception(*sys.exc_info())
             if self._is_destroying:
                 break
-
-        if not self._is_destroying:
-            self.ui_poll_job = self.after(50, self._drain_ui_callbacks)
 
     def _cancel_job(self, job_name: str) -> None:
         job_id = vars(self).get(job_name)
@@ -2412,13 +2450,9 @@ class WeatherWidget(tk.Tk):
         available = max(0, condition_bounds[0] - city_coords[0] - 16)
         font = self.city_label_font
         text = self.city_label_text
-        if font.measure(text) > available:
+        if "," in text and font.measure(text) > available:
             text = text.split(",", 1)[0]
-        if font.measure(text) > available:
-            while text and font.measure(text + "...") > available:
-                text = text[:-1]
-            text = text + "..." if font.measure("...") <= available else ""
-        canvas.itemconfigure(self.hero_city_label, text=text)
+        canvas.itemconfigure(self.hero_city_label, text=fit_text(text, available, font.measure))
 
     def _layout_today_weather_stack(self, right_text: int, right_stack_top: int) -> None:
         self.popup_bg_canvas.coords(self.today_condition_label, right_text - 4, right_stack_top + 2)
@@ -2792,8 +2826,14 @@ class WeatherWidget(tk.Tk):
         except CityNotFoundError as error:
             message = str(error)
             city_not_found = True
-        except (URLError, TimeoutError, ConnectionError, IncompleteRead):
-            message = "Verkkovirhe. Tarkista internet-yhteys."
+        except (URLError, TimeoutError, ConnectionError, IncompleteRead) as error:
+            if _is_certificate_error(error):
+                message = (
+                    "Sääpalvelun HTTPS-varmennetta ei voitu vahvistaa. "
+                    "Tarkista koneen päivämäärä ja sovelluksen päivitykset."
+                )
+            else:
+                message = "Verkkovirhe. Tarkista internet-yhteys."
         except WeatherServiceError as error:
             message = str(error)
         except Exception as error:  # noqa: BLE001
