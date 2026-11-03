@@ -1,6 +1,7 @@
 param(
     [switch]$SkipInstaller,
-    [string]$Version
+    [string]$Version,
+    [switch]$AllowUnsigned
 )
 
 $ErrorActionPreference = 'Stop'
@@ -96,8 +97,13 @@ function Ensure-Tool {
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $root
+. (Join-Path $root '.github/scripts/windows-signing.ps1')
 
 $normalizedVersion = Resolve-BuildVersion -MetadataPath (Join-Path $root 'app_metadata.json') -RequestedVersion $Version
+$signingConfiguration = Resolve-WindowsSigningConfiguration -AllowUnsigned:$AllowUnsigned
+if (-not $signingConfiguration) {
+    Write-Warning 'UNSIGNED LOCAL TEST BUILD: Windows Smart App Control may block this package. It cannot be published by the release scripts.'
+}
 
 $python = Resolve-PythonCommand -ProjectDirectory $root
 Invoke-Python -Python $python -Arguments @('-m', 'pip', 'install', '-r', 'requirements.txt')
@@ -124,6 +130,9 @@ foreach ($requiredPath in $requiredBuildPaths) {
         throw "Portable build is missing a required file: $requiredPath"
     }
 }
+if ($signingConfiguration) {
+    Invoke-WindowsPackageSigning -Directory $distDir -Configuration $signingConfiguration
+}
 $releaseDir = Join-Path $root 'release'
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 
@@ -142,17 +151,26 @@ $releaseArtifacts = @($zipPath)
 $iscc = Get-Command iscc -ErrorAction SilentlyContinue
 if (-not $SkipInstaller -and $iscc) {
     Write-Host 'Building installer...'
-    & $iscc.Source "/DAppVersion=$normalizedVersion" (Join-Path $root 'installer.iss')
+    $installerArguments = @("/DAppVersion=$normalizedVersion")
+    if ($signingConfiguration) { $installerArguments += Get-InnoSigningArguments -ProjectDirectory $root }
+    & $iscc.Source @installerArguments (Join-Path $root 'installer.iss')
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup build failed with exit code $LASTEXITCODE."
     }
     if (-not (Test-Path -LiteralPath $installerPath)) {
         throw "Installer build completed without the expected artifact: $installerPath"
     }
+    if ($signingConfiguration) { Assert-WindowsFileSignature -Path $installerPath -RequireTimestamp }
     $releaseArtifacts += $installerPath
 }
 elseif (-not $SkipInstaller) {
     Write-Host 'Inno Setup was not found. The portable package was built, but the installer was skipped.'
+}
+
+if ($signingConfiguration) {
+    $signatureArguments = @{ PortableZip = $zipPath }
+    if (Test-Path -LiteralPath $installerPath) { $signatureArguments.Installer = $installerPath }
+    Assert-WindowsReleaseArtifacts @signatureArguments
 }
 
 $checksumPath = Join-Path $releaseDir 'SHA256SUMS.txt'

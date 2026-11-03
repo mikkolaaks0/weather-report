@@ -157,6 +157,7 @@ function Publish-LocalReleaseTag {
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $root
 . (Join-Path $root '.github/scripts/release-assets.ps1')
+. (Join-Path $root '.github/scripts/windows-signing.ps1')
 $metadata = Get-Content -LiteralPath (Join-Path $root 'app_metadata.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($metadata.version -notmatch '^\d+\.\d+\.\d+$') {
     throw 'app_metadata.json must contain a semantic version like 0.1.2.'
@@ -165,6 +166,8 @@ if ($Version -and $Version -cnotmatch ('^v?' + [regex]::Escape($metadata.version
     throw "Requested version $Version does not match app_metadata.json ($($metadata.version)). Update the metadata before publishing."
 }
 $Version = "v$($metadata.version)"
+# Fail before pushing commits or tags when the release cannot be signed.
+$null = Resolve-WindowsSigningConfiguration
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     throw 'Git was not found in PATH.'
@@ -195,6 +198,9 @@ if (-not (Test-Path -LiteralPath $portableZip)) {
 if (-not (Test-Path -LiteralPath $checksums)) {
     throw "Release checksum file was not found: $checksums"
 }
+$signatureArguments = @{ PortableZip = $portableZip }
+if (Test-Path -LiteralPath $installer) { $signatureArguments.Installer = $installer }
+Assert-WindowsReleaseArtifacts @signatureArguments
 
 Assert-ReleaseSourceUnchanged -Commit $releaseCommit -Branch $branch
 Publish-LocalReleaseTag -Tag $Version -Commit $releaseCommit

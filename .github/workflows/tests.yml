@@ -40,7 +40,8 @@ jobs:
         run: |
           $files = @(
             'install.ps1', 'uninstall.ps1', 'build_release.ps1', 'publish_release.ps1',
-            '.github/scripts/publish-release.ps1', '.github/scripts/release-assets.ps1'
+            '.github/scripts/publish-release.ps1', '.github/scripts/release-assets.ps1',
+            '.github/scripts/windows-signing.ps1', '.github/scripts/sign-file.ps1'
           )
           foreach ($file in $files) {
             $tokens = $null

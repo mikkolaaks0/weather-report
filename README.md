@@ -210,13 +210,18 @@ PowerShell process and disk write. Legacy links and stale link fields are still 
 
 ## Build
 
+Release builds require Windows code signing. Configure a publicly trusted
+certificate or signing provider as described in [SIGNING.md](https://github.com/mikkolaaks0/weather-report/blob/main/SIGNING.md).
+This is required for the Smart App Control fix; checksums alone do not establish
+a trusted Windows publisher. Previously downloaded unsigned EXEs need replacement.
+
 The build uses the project's `.venv\Scripts\python.exe` when `.venv` exists,
 matching the source launcher. It checks Python 3.10+ and Tkinter before installing
 build dependencies. A broken project environment stops the build with a clear
 error instead of installing into another Python environment. When `.venv` is
 absent, the existing `py`, `python`, and `python3` fallbacks remain available.
 
-Create a portable release package:
+Create a signed portable release package after configuring signing:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_release.ps1 -SkipInstaller
@@ -227,6 +232,10 @@ Create a portable package and an installer, when Inno Setup is installed:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_release.ps1
 ```
+
+Without signing credentials, use `-AllowUnsigned -SkipInstaller` for a local test
+build only. Windows may block it. Release publishing refuses unsigned packages;
+a failed configured signer never falls back to unsigned output.
 
 Release artifacts are written to `release/`. `SHA256SUMS.txt` contains only the
 artifacts produced by the current build, so unrelated files in `release/` cannot
@@ -306,7 +315,9 @@ the font manually.
 ## Publish A Release
 
 The GitHub Actions `Release` workflow builds and publishes a portable release
-when a version tag is pushed. No local GitHub CLI login is needed. Set the
+when a version tag is pushed and the signing provider has been configured
+([setup](https://github.com/mikkolaaks0/weather-report/blob/main/SIGNING.md)).
+Missing signing credentials stop publication. No local GitHub CLI login is needed. Set the
 version and date in `app_metadata.json`, commit and push `main`, then tag that
 commit. For example, when publishing version `0.1.5`:
 
@@ -443,8 +454,9 @@ downloads `WeatherReport-portable*.zip`, verifies `SHA256SUMS.txt` when
 available, and replaces the installed package. The app's tray update action is
 therefore available only when running from a Git checkout.
 
-For public distribution, prefer GitHub Releases with a signed or checksummed
-installer/portable package.
+Public releases require verified Windows signatures on the native payload and
+installer, and include checksums for download verification. The publisher checks
+the final archive again before uploading it.
 
 ## Weather Data
 

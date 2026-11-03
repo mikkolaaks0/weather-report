@@ -24,6 +24,9 @@ jobs:
       contents: write
     env:
       PY_PYTHON3: "3.13"
+      # A repository-owned provider hook must use a publicly trusted signing
+      # identity. Credentials stay in GitHub Secrets, never in the source tree.
+      WEATHERREPORT_SIGNING_SCRIPT: ${{ vars.WEATHERREPORT_SIGNING_SCRIPT }}
     defaults:
       run:
         shell: pwsh
@@ -59,6 +62,8 @@ jobs:
 
       - name: Test and build Windows package
         if: steps.tag.outputs.publish == 'true'
+        env:
+          WEATHERREPORT_SIGNING_TOKEN: ${{ secrets.WEATHERREPORT_SIGNING_TOKEN }}
         run: ./build_release.ps1 -Version $env:GITHUB_REF_NAME -SkipInstaller
 
       - name: Publish complete release

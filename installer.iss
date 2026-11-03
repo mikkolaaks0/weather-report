@@ -23,6 +23,10 @@ SetupIconFile=assets\app.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64compatible
+#ifdef SignWindows
+SignTool=WeatherReportSign
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
