@@ -64,7 +64,9 @@ class PopupScalingTests(unittest.TestCase):
         for scale in (1.0, 1.5, 2.0):
             with self.subTest(scale=scale), self.scaled_widget(scale) as widget:
                 width, height = self.populated_popup(widget)
-                self.assertEqual(widget.ui_scale, scale)
+                # Tk derives scaling from integer screen millimetres, so a
+                # requested 200% can read back as 201% on a virtual display.
+                self.assertAlmostEqual(widget.ui_scale, scale, delta=0.02)
                 canvas = widget.popup_bg_canvas
                 bounds = canvas.bbox
                 self.assertLess(bounds(widget.clock_label)[2], bounds(widget.theme_dot_item)[0])
@@ -127,7 +129,7 @@ class PopupScalingTests(unittest.TestCase):
                 self.assertGreaterEqual(x, 0)
                 self.assertLessEqual(x + dropdown_width, width)
                 self.assertLessEqual(y + control.winfo_reqheight(), height)
-                self.assertEqual(control.scale, scale)
+                self.assertEqual(control.scale, widget.ui_scale)
                 control._select(1)
                 control.submit = Mock()
                 control.confirm()
