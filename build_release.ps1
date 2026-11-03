@@ -95,7 +95,7 @@ function Ensure-Tool {
 }
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $root
+Set-Location -LiteralPath $root
 
 $normalizedVersion = Resolve-BuildVersion -MetadataPath (Join-Path $root 'app_metadata.json') -RequestedVersion $Version
 

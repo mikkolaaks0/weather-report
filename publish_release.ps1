@@ -105,8 +105,58 @@ function Assert-ReleaseSourceUnchanged {
     }
 }
 
+function Assert-ReusableReleaseTag {
+    param([string]$Tag, [string]$Commit)
+
+    $reference = "refs/tags/$Tag"
+    $type = Get-RequiredCommandOutput -Command 'git' -Arguments @('cat-file', '-t', $reference)
+    $target = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', "$reference^{commit}")
+    $annotation = @(Get-RequiredCommandOutput -Command 'git' -Arguments @('for-each-ref', '--format=%(contents)', $reference)) -join "`n"
+    if ($type -cne 'tag' -or $target -ne $Commit -or $annotation -notmatch '\[local-release\]') {
+        throw "Refusing to reuse a foreign tag or a tag for another commit: $Tag"
+    }
+    return Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', $reference)
+}
+
+function Publish-LocalReleaseTag {
+    param([string]$Tag, [string]$Commit)
+
+    if ($Tag -cnotmatch '^v\d+\.\d+\.\d+$') {
+        throw "Invalid release tag: $Tag"
+    }
+    $reference = "refs/tags/$Tag"
+    $remoteTag = @(Get-RequiredCommandOutput -Command 'git' -Arguments @('ls-remote', '--tags', 'origin', $reference))
+    $remoteObject = $null
+    if ($remoteTag.Count) {
+        if ($remoteTag.Count -ne 1 -or $remoteTag[0] -notmatch ('^([0-9a-fA-F]{40,64})\s+' + [regex]::Escape($reference) + '$')) {
+            throw "Unrecognized remote tag: $Tag"
+        }
+        $remoteObject = $Matches[1]
+    }
+    $localTags = @(Get-RequiredCommandOutput -Command 'git' -Arguments @('for-each-ref', '--format=%(refname)', $reference))
+    $existsLocally = $localTags -ccontains $reference
+    if (-not $existsLocally -and $remoteObject) {
+        Invoke-RequiredCommand -Command 'git' -Arguments @('fetch', 'origin', "$($reference):$reference")
+        $existsLocally = $true
+    }
+    if ($existsLocally) {
+        $localObject = Assert-ReusableReleaseTag -Tag $Tag -Commit $Commit
+    }
+    else {
+        Invoke-RequiredCommand -Command 'git' -Arguments @('tag', '-a', $Tag, $Commit, '-m', "Weather Report $Tag [local-release]")
+        $localObject = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', $reference)
+    }
+    if ($remoteObject -and $remoteObject -ne $localObject) {
+        throw "Local and remote release tags do not match: $Tag"
+    }
+    if (-not $remoteObject) {
+        Invoke-RequiredCommand -Command 'git' -Arguments @('push', 'origin', $reference)
+    }
+}
+
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $root
+Set-Location -LiteralPath $root
+. (Join-Path $root '.github/scripts/release-assets.ps1')
 $metadata = Get-Content -LiteralPath (Join-Path $root 'app_metadata.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($metadata.version -notmatch '^\d+\.\d+\.\d+$') {
     throw 'app_metadata.json must contain a semantic version like 0.1.2.'
@@ -130,17 +180,6 @@ Assert-CleanWorkingTree
 $branch = Sync-CurrentBranch -ExpectedBranch $releaseBranch
 $releaseCommit = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')
 
-if (git rev-parse -q --verify "refs/tags/$Version") {
-    throw "Tag already exists: $Version"
-}
-$remoteTag = git ls-remote --tags origin "refs/tags/$Version"
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not check remote tag: $Version"
-}
-if ($remoteTag) {
-    throw "Tag already exists on origin: $Version"
-}
-
 $buildArgs = @('-ExecutionPolicy', 'Bypass', '-File', '.\build_release.ps1', '-Version', $Version)
 if ($SkipInstaller) {
     $buildArgs += '-SkipInstaller'
@@ -158,34 +197,13 @@ if (-not (Test-Path -LiteralPath $checksums)) {
 }
 
 Assert-ReleaseSourceUnchanged -Commit $releaseCommit -Branch $branch
-Invoke-RequiredCommand -Command 'git' -Arguments @('tag', '-a', $Version, $releaseCommit, '-m', "Weather Report $Version [local-release]")
-Invoke-RequiredCommand -Command 'git' -Arguments @('push', 'origin', $Version)
+Publish-LocalReleaseTag -Tag $Version -Commit $releaseCommit
 
-$notes = @"
-Weather Report $Version
-
-Windows tray weather app release.
-"@
-
-$releaseArgs = @(
-    'release', 'create', $Version,
-    $portableZip
-)
+$releaseArtifacts = @($portableZip, $checksums)
 if (Test-Path -LiteralPath $installer) {
-    $releaseArgs += $installer
-}
-$releaseArgs += @(
-    $checksums,
-    '--title', "Weather Report $Version",
-    '--notes', $notes,
-    '--target', $releaseCommit
-)
-if ($Draft) {
-    $releaseArgs += '--draft'
-}
-if ($Prerelease) {
-    $releaseArgs += '--prerelease'
+    $releaseArtifacts += $installer
 }
 
-Invoke-RequiredCommand -Command 'gh' -Arguments $releaseArgs
-Write-Host "Published $Version from $branch."
+Publish-ReleaseAssets -Tag $Version -Artifacts $releaseArtifacts -Draft:$Draft -Prerelease:$Prerelease
+if ($Draft) { Write-Host "Prepared draft $Version from $branch." }
+else { Write-Host "Published $Version from $branch." }

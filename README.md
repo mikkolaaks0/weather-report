@@ -118,6 +118,12 @@ Repeated dropdown layouts reuse fitted labels until the text, width, font, or
 display scaling changes. Text fitting preserves Unicode shaping and never
 draws an ellipsis wider than the available space.
 The popup clock runs only while the card is open and updates immediately on reopening.
+The popup, controls, icons, and suggestion dropdown follow the display scaling
+reported by Tk at startup, including 150% and 200% displays. Point-sized fonts
+and pixel-based layout use the same scale. The popup remains bounded by the
+available work area. Moving an already-running app between monitors with different
+DPI settings does not currently recompute the layout scale; restart it on the
+target display when needed.
 Closing the app during a popup refresh error also cancels the pending popup
 opening, so it cannot access an already destroyed window.
 Popup layout does not run unrelated idle callbacks. Window positioning also
@@ -137,8 +143,9 @@ even if the previous request completed less than 15 minutes ago. This uses the
 location's UTC offset from Open-Meteo, not the computer's date.
 Unknown names return refresh to the previous location and its normal interval
 when a previous forecast exists. Impossible optional values (such as humidity
-above 100%, negative wind speed, or wind directions outside 0–360 degrees) display as missing without hiding valid
-weather data. A missing sun-event time is never presented as midnight.
+above 100%, negative wind speed, or wind directions outside 0–360 degrees)
+display as missing without hiding valid weather data. A missing sun-event time
+is never presented as midnight.
 Suggestions use the existing Open-Meteo geocoding service, with no location
 permission or additional dependencies. See its [matching rules](https://open-meteo.com/en/docs/geocoding-api).
 
@@ -163,6 +170,14 @@ Packaged releases include the bundle; existing EXE installations need a rebuilt
 release to receive this code and certificate update.
 Certificate verification failures are not retried as transient network errors,
 and the weather view identifies them separately from an offline connection.
+HTTPS redirects must remain HTTPS at every hop; redirects to HTTP or FTP are
+rejected before a request reaches the insecure destination. Redirect response
+bodies are closed without reading them, so they cannot bypass the final JSON
+size limit or hold the worker while an unnecessary body is drained. A body shorter than
+its declared `Content-Length` is treated as an interrupted connection and gets
+the same bounded retry as other transient transport failures, even if the
+received prefix happens to be valid JSON. Response-size limits still apply
+before parsing, without retrying oversized responses.
 
 For a windowless launch, use:
 
@@ -349,6 +364,13 @@ repository-local Git overrides before publishing. Untracked files block release
 publishing even when Git is configured to hide them from status output.
 Locally published tags carry a `[local-release]` annotation so the Actions
 workflow does not publish the same version in parallel or override `-Draft`.
+Local and Actions publishing share the same draft/upload/finalize implementation.
+If a local upload fails, rerun the same command from the same clean commit:
+the script reuses only an annotated `[local-release]` tag for that exact commit,
+and verifies that local and remote tag objects agree. A missing local copy of
+that remote tag can be fetched without replacing another tag. Conflicting tags
+and already-published releases are rejected. `-Draft` leaves the completed
+assets in a draft, and `-Prerelease` never marks the version as Latest.
 
 The one-line installer uses the latest GitHub Release and verifies the portable
 zip when `SHA256SUMS.txt` is present.
@@ -395,10 +417,14 @@ The updater clears inherited repository-local Git context and reads Git output
 as UTF-8, keeping commands scoped to this checkout and supporting international
 filenames on Windows. Untracked files remain a reason to skip automatic updates
 even when Git's status configuration normally hides them.
+The check explicitly refreshes the `origin/main` tracking reference even when
+the checkout uses a custom fetch mapping. Rewritten remote history is detected
+as divergence; local code is never reset to it.
 That local restart check works without an internet connection and compares file
 content hashes, so timestamp-only changes do not request a
 restart and same-size edits with identical timestamps are still detected.
-Only running code, launchers, metadata, PNG/ICO assets, and font files are tracked;
+Only running code, dependency requirements, launchers, metadata, PNG/ICO assets,
+and font files are tracked;
 SVG editing sources, the original logo source, and documentation do not trigger
 a restart prompt.
 Only one update

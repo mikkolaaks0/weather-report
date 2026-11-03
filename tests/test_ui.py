@@ -1,8 +1,159 @@
 import os
 import unittest
+from contextlib import ExitStack, contextmanager
 from unittest.mock import Mock, patch
 
 import main
+
+
+@unittest.skipUnless(os.name == "nt" and main.ImageTk is not None, "Windows Tk/Pillow display scaling")
+class PopupScalingTests(unittest.TestCase):
+    @contextmanager
+    def scaled_widget(self, scale):
+        original_init = main.tk.Tk.__init__
+        previous_scaling = []
+
+        def initialize(root, *args, **kwargs):
+            original_init(root, *args, **kwargs)
+            previous_scaling.append(root.tk.call("tk", "scaling"))
+            root.tk.call("tk", "scaling", scale * (96 / 72))
+            root.withdraw()
+
+        with ExitStack() as stack:
+            for patcher in (
+                patch.object(main.tk.Tk, "__init__", initialize),
+                patch.object(main, "load_settings", return_value={
+                    "city": "Espoo", "temperature_unit": "celsius", "popup_theme": main.DEFAULT_POPUP_THEME,
+                }),
+                patch.object(main, "save_settings", return_value=True),
+                patch.object(main, "is_startup_enabled", return_value=False),
+                patch.object(main.WeatherWidget, "_init_tray_icon"),
+                patch.object(main.WeatherWidget, "_start_background_worker"),
+            ):
+                stack.enter_context(patcher)
+            widget = main.WeatherWidget()
+            try:
+                yield widget
+            finally:
+                widget.tk.call("tk", "scaling", previous_scaling[0])
+                widget.destroy()
+
+    def populated_popup(self, widget):
+        dates = [f"2026-11-{day:02d}" for day in range(3, 10)]
+        weather = {
+            "current": {
+                "time": dates[0] + "T12:00", "weather_code": 3, "temperature_2m": 18,
+                "relative_humidity_2m": 70, "wind_speed_10m": 5, "wind_direction_10m": 180,
+            },
+            "daily": {
+                "time": dates, "weather_code": [3] * 7,
+                "temperature_2m_min": [8] * 7, "temperature_2m_max": [18] * 7,
+                "precipitation_probability_max": [60] * 7, "precipitation_sum": [1.2] * 7,
+                "sunrise": [day + "T08:00" for day in dates],
+                "sunset": [day + "T16:00" for day in dates],
+            },
+        }
+        widget._apply_weather({"name": "Espoo", "latitude": 60.2, "longitude": 24.65}, weather, "Espoo")
+        widget.clock_var.set("ti 03.11.2026 12:34:56")
+        width, height = widget._px(584), widget._px(329)
+        widget.popup.geometry(f"{width}x{height}+0+0")
+        widget._layout_popup_content(width, height)
+        return width, height
+
+    def test_scaled_popups_keep_text_controls_and_forecast_separate(self):
+        for scale in (1.0, 1.5, 2.0):
+            with self.subTest(scale=scale), self.scaled_widget(scale) as widget:
+                width, height = self.populated_popup(widget)
+                self.assertEqual(widget.ui_scale, scale)
+                canvas = widget.popup_bg_canvas
+                bounds = canvas.bbox
+                self.assertLess(bounds(widget.clock_label)[2], bounds(widget.theme_dot_item)[0])
+                self.assertLess(bounds(widget.hero_updated_label)[3], bounds(widget.hero_city_label)[1])
+                self.assertLess(bounds(widget.hero_city_label)[2], bounds(widget.today_condition_label)[0])
+                forecast_top = min(bounds(card["day"])[1] for card in widget.forecast_cards)
+                self.assertLess(bounds(widget.hero_temp_label)[3], forecast_top)
+                self.assertLess(bounds(widget.today_wind_value_label)[3], forecast_top)
+                self.assertLess(
+                    max(bounds(card["temp"])[3] for card in widget.forecast_cards),
+                    bounds(widget.footer_label)[1],
+                )
+                for item in (
+                    widget.clock_label, widget.theme_dot_item, widget.hero_city_label,
+                    widget.hero_temp_label, widget.today_condition_label, widget.footer_label,
+                    widget.location_entry_window, widget.search_button_window,
+                    widget.refresh_button_window, widget.close_button_window,
+                ):
+                    x1, y1, x2, y2 = bounds(item)
+                    self.assertGreaterEqual(x1, 0)
+                    self.assertGreaterEqual(y1, 0)
+                    self.assertLessEqual(x2, width)
+                    self.assertLessEqual(y2, height)
+                for item, control in (
+                    (widget.location_entry_window, widget.location_entry_shell),
+                    (widget.search_button_window, widget.search_button),
+                    (widget.refresh_button_window, widget.refresh_button),
+                    (widget.close_button_window, widget.close_button),
+                ):
+                    box = bounds(item)
+                    self.assertGreaterEqual(box[3] - box[1], control.winfo_reqheight())
+                self.assertEqual(widget.rain_prob_drop_icon_photo.width(), widget._px(12))
+                self.assertEqual(widget.sunrise_sun_icon_photo.width(), widget._px(main.SUN_EVENT_ICON_SIZE))
+                hero_photo = widget._weather_icon_photo("cloudy", main.HERO_ICON_WIDTH, main.HERO_ICON_HEIGHT)
+                self.assertEqual((hero_photo.width(), hero_photo.height()), (widget._px(87), widget._px(84)))
+
+    def test_scaled_suggestions_fit_the_popup_and_keep_full_location_selection(self):
+        for scale in (1.0, 1.5, 2.0):
+            with self.subTest(scale=scale), self.scaled_widget(scale) as widget:
+                width, height = self.populated_popup(widget)
+                control = widget.city_search
+                entry = widget.popup_bg_canvas.bbox(widget.location_entry_window)
+                places = [
+                    {"name": "Helsinki", "latitude": 60.17, "longitude": 24.94, "country": "Suomi"},
+                    {"name": "Helsingborg", "latitude": 56.05, "longitude": 12.69, "country": "Ruotsi"},
+                ]
+                with (
+                    patch.object(widget.popup_bg_canvas, "winfo_width", return_value=width),
+                    patch.object(widget.popup_bg_canvas, "winfo_rootx", return_value=0),
+                    patch.object(widget.popup_bg_canvas, "winfo_rooty", return_value=0),
+                    patch.object(widget.location_entry, "winfo_rootx", return_value=entry[0]),
+                    patch.object(widget.location_entry, "winfo_rooty", return_value=entry[1]),
+                    patch.object(widget.location_entry, "winfo_width", return_value=entry[2] - entry[0]),
+                    patch.object(widget.location_entry, "winfo_height", return_value=entry[3] - entry[1]),
+                ):
+                    widget.detail_city_var.set("Hel")
+                    control._present_results(places, False)
+                info = control.place_info()
+                x, y, dropdown_width = (int(info[key]) for key in ("x", "y", "width"))
+                self.assertGreaterEqual(x, 0)
+                self.assertLessEqual(x + dropdown_width, width)
+                self.assertLessEqual(y + control.winfo_reqheight(), height)
+                self.assertEqual(control.scale, scale)
+                control._select(1)
+                control.submit = Mock()
+                control.confirm()
+                control.submit.assert_called_once_with("Helsingborg", places[1])
+
+    def test_scaled_popup_position_stays_within_the_available_screen(self):
+        for scale in (1.0, 1.5, 2.0):
+            with self.subTest(scale=scale), self.scaled_widget(scale) as widget:
+                with (
+                    patch("ctypes.windll.user32.SystemParametersInfoW", return_value=0),
+                    patch.object(widget, "winfo_screenwidth", return_value=1000),
+                    patch.object(widget, "winfo_screenheight", return_value=700),
+                    patch.object(widget.popup, "geometry") as geometry,
+                    patch.object(widget.popup, "update_idletasks"),
+                    patch.object(widget, "_apply_popup_round_corners"),
+                ):
+                    widget._position_popup()
+                size, x, y = geometry.call_args.args[0].split("+")
+                width, height = (int(value) for value in size.split("x"))
+                x, y = int(x), int(y)
+                self.assertGreater(width, 0)
+                self.assertGreater(height, 0)
+                self.assertGreaterEqual(x, 0)
+                self.assertGreaterEqual(y, 0)
+                self.assertLessEqual(x + width, 1000)
+                self.assertLessEqual(y + height, 700)
 
 
 @unittest.skipUnless(os.name == "nt" and main.ImageTk is not None, "Windows Tk/Pillow timers")
@@ -303,22 +454,22 @@ class TimerLifecycleTests(unittest.TestCase):
 
     def test_repeated_layout_reuses_fonts_and_keeps_canvas_geometry(self) -> None:
         widget = self.widget
-        widget._layout_popup_content(584, 329)
+        widget._layout_popup_content(widget._px(584), widget._px(329))
         canvas = widget.popup_bg_canvas
         before = [(item, canvas.coords(item), canvas.bbox(item)) for item in canvas.find_all()]
         with patch.object(main.tkfont, "Font", wraps=main.tkfont.Font) as create_font:
             for _ in range(10):
-                widget._layout_popup_content(584, 329)
+                widget._layout_popup_content(widget._px(584), widget._px(329))
             create_font.assert_not_called()
         self.assertEqual(before, [(item, canvas.coords(item), canvas.bbox(item)) for item in canvas.find_all()])
 
     def test_weather_stack_does_not_process_unrelated_idle_callbacks(self) -> None:
         widget = self.widget
-        widget._layout_popup_content(584, 329)
+        widget._layout_popup_content(widget._px(584), widget._px(329))
         idle_callback = Mock()
         job = widget.after_idle(idle_callback)
         try:
-            widget._layout_today_weather_stack(552, 58)
+            widget._layout_today_weather_stack(widget._px(552), widget._px(58))
             idle_callback.assert_not_called()
         finally:
             widget.after_cancel(job)
@@ -328,7 +479,7 @@ class TimerLifecycleTests(unittest.TestCase):
         idle_callback = Mock()
         job = widget.after_idle(idle_callback)
         try:
-            widget._layout_popup_content(584, 329)
+            widget._layout_popup_content(widget._px(584), widget._px(329))
             idle_callback.assert_not_called()
         finally:
             widget.after_cancel(job)
@@ -340,17 +491,19 @@ class TimerLifecycleTests(unittest.TestCase):
             widget.location_entry_window, widget.search_button_window,
             widget.refresh_button_window, widget.close_button_window,
         )
-        widget._layout_popup_content(584, 329)
+        widget._layout_popup_content(widget._px(584), widget._px(329))
         bounds = [canvas.bbox(item) for item in controls]
-        self.assertGreater(bounds[0][2] - bounds[0][0], 100)
+        self.assertGreater(bounds[0][2] - bounds[0][0], widget._px(100))
         for left, right in zip(bounds, bounds[1:]):
             self.assertLess(left[2], right[0])
-        for x1, y1, x2, y2 in bounds:
+        for (x1, y1, x2, y2), control in zip(bounds, (
+            widget.location_entry_shell, widget.search_button, widget.refresh_button, widget.close_button,
+        )):
             self.assertGreater(x2 - x1, 1)
-            self.assertEqual(y1, 12)
-            self.assertEqual(y2 - y1, main.POPUP_CONTROL_HEIGHT)
+            self.assertEqual(y1, widget._px(12))
+            self.assertEqual(y2 - y1, max(widget._px(main.POPUP_CONTROL_HEIGHT), control.winfo_reqheight()))
         widget.update_idletasks()
-        widget._layout_popup_content(584, 329)
+        widget._layout_popup_content(widget._px(584), widget._px(329))
         self.assertEqual(bounds, [canvas.bbox(item) for item in controls])
 
     def test_city_measurements_use_the_same_font_as_the_rendered_label(self) -> None:
@@ -360,12 +513,12 @@ class TimerLifecycleTests(unittest.TestCase):
         widget.city_label_text = "Lappeenranta, Etel\u00e4-Karjala"
         for size in (18, 20, 14):
             widget.city_label_font.configure(size=size)
-            widget._layout_popup_content(450, 329)
+            widget._layout_popup_content(widget._px(450), widget._px(329))
             self.assertLess(canvas.bbox(widget.hero_city_label)[2], canvas.bbox(widget.today_condition_label)[0])
 
     def test_shorter_forecast_clears_old_cards_and_keeps_their_geometry(self) -> None:
         widget = self.widget
-        widget._layout_popup_content(584, 329)
+        widget._layout_popup_content(widget._px(584), widget._px(329))
         canvas = widget.popup_bg_canvas
         daily = {
             "time": [f"2026-10-{day:02}" for day in range(6, 13)],
@@ -497,7 +650,7 @@ class PopupSmokeTests(unittest.TestCase):
         ):
             widget = main.WeatherWidget()
             try:
-                widget._layout_popup_content(584, 329)
+                widget._layout_popup_content(widget._px(584), widget._px(329))
                 widget._apply_weather({"name": "Espoo", "admin1": "Uusimaa"}, weather, "Espoo")
                 canvas = widget.popup_bg_canvas
                 self.assertEqual(canvas.itemcget(widget.hero_temp_label, "text"), "18\N{DEGREE SIGN}C")
@@ -510,7 +663,7 @@ class PopupSmokeTests(unittest.TestCase):
                     icon_items.append((card["icon"], (43, 39)))
                 for item, expected_size in icon_items:
                     x1, y1, x2, y2 = canvas.bbox(item)
-                    self.assertEqual((x2 - x1, y2 - y1), expected_size)
+                    self.assertEqual((x2 - x1, y2 - y1), tuple(widget._px(size) for size in expected_size))
 
                 with patch.object(main.messagebox, "showerror") as dialog:
                     widget._show_error("Network error")
@@ -532,7 +685,7 @@ class PopupSmokeTests(unittest.TestCase):
                 weather["current"]["weather_code"] = 3
                 widget._apply_weather({"name": "Espoo", "admin1": "Uusimaa"}, weather, "Espoo")
                 self.assertEqual(canvas.itemcget(widget.hero_city_label, "text"), "Espoo, Uusimaa")
-                widget._layout_popup_content(450, 329)
+                widget._layout_popup_content(widget._px(450), widget._px(329))
                 self.assertLess(canvas.bbox(widget.hero_city_label)[2], canvas.bbox(widget.today_condition_label)[0])
             finally:
                 widget.destroy()

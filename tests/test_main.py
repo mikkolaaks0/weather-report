@@ -269,7 +269,7 @@ class HTTPSClientSecurityTests(unittest.TestCase):
             with (
                 self.subTest(version=getattr(package, "__version__", None)),
                 patch.object(main, "certifi", package),
-                patch.object(main, "urlopen") as open_url,
+                patch.object(main, "_open_weather_request") as open_url,
                 self.assertRaisesRegex(main.WeatherServiceError, "HTTPS-varmenteet"),
             ):
                 main._get_json("https://example.invalid", {})
@@ -284,7 +284,7 @@ class HTTPSClientSecurityTests(unittest.TestCase):
                 with (
                     self.subTest(bundle=bundle),
                     patch.object(main, "certifi", package),
-                    patch.object(main, "urlopen") as open_url,
+                    patch.object(main, "_open_weather_request") as open_url,
                     self.assertRaisesRegex(main.WeatherServiceError, "HTTPS-varmenteita"),
                 ):
                     main._get_json("https://example.invalid", {})
@@ -293,7 +293,7 @@ class HTTPSClientSecurityTests(unittest.TestCase):
     def test_certificate_rejection_fails_without_retry_or_weaker_trust(self) -> None:
         certificate_error = ssl.SSLCertVerificationError(1, "certificate verify failed")
         with (
-            patch.object(main, "urlopen", side_effect=URLError(certificate_error)) as open_url,
+            patch.object(main, "_open_weather_request", side_effect=URLError(certificate_error)) as open_url,
             patch.object(main.time, "sleep") as sleep,
         ):
             with self.assertRaises(URLError) as raised:
@@ -332,7 +332,7 @@ class ServicePayloadTests(unittest.TestCase):
     def test_json_client_closes_http_errors_without_a_retry_wrapper(self) -> None:
         body = io.BytesIO(b"unavailable")
         error = HTTPError("https://example.invalid", 503, "unavailable", None, body)
-        with patch.object(main, "urlopen", side_effect=error):
+        with patch.object(main, "_open_weather_request", side_effect=error):
             with self.assertRaises(HTTPError):
                 main._get_json("https://example.invalid", {})
         self.assertTrue(body.closed)
@@ -417,7 +417,7 @@ class ServicePayloadTests(unittest.TestCase):
             def read(self, size: int = -1) -> bytes:
                 return self.payload if size < 0 else self.payload[:size]
 
-        with patch.object(main, "urlopen", return_value=Response(b'{"ok": true}')) as mocked_open:
+        with patch.object(main, "_open_weather_request", return_value=Response(b'{"ok": true}')) as mocked_open:
             self.assertEqual(main._get_json("https://example.invalid", {"q": "Espoo"}), {"ok": True})
         request = mocked_open.call_args.args[0]
         self.assertEqual(request.get_header("Accept"), "application/json")
@@ -435,13 +435,13 @@ class ServicePayloadTests(unittest.TestCase):
         )
         for payload in invalid_payloads:
             with self.subTest(payload_length=len(payload)):
-                with patch.object(main, "urlopen", return_value=Response(payload)):
+                with patch.object(main, "_open_weather_request", return_value=Response(payload)):
                     with self.assertRaises(main.WeatherServiceError):
                         main._get_json("https://example.invalid", {})
 
         with (
             patch.object(main, "MAX_JSON_RESPONSE_BYTES", 8),
-            patch.object(main, "urlopen", return_value=Response(b"123456789")),
+            patch.object(main, "_open_weather_request", return_value=Response(b"123456789")),
         ):
             with self.assertRaisesRegex(main.WeatherServiceError, "liian suuri"):
                 main._get_json("https://example.invalid", {})
@@ -1113,7 +1113,10 @@ class UpdateSafetyTests(unittest.TestCase):
         self.assertEqual(status["state"], "available")
         self.assertEqual(status["local"], "local-sha")
         self.assertEqual(status["remote"], "remote-sha")
-        self.assertEqual(git_output.call_args_list[2].args[0], ["fetch", "origin", "main"])
+        self.assertEqual(
+            git_output.call_args_list[2].args[0],
+            ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"],
+        )
         self.assertEqual(
             run_git.call_args_list[1].args[0],
             ["merge-base", "--is-ancestor", "HEAD", "origin/main"],
@@ -1198,7 +1201,7 @@ class UpdateSafetyTests(unittest.TestCase):
                 for name in (
                     "assets/logo.png", "assets/app.ico", "assets/fonts/Exo2-Regular.ttf",
                     "assets/metric-icons/wind.png", "assets/weather-icons/sun.png",
-                    "main.py", "city_search.py", "start_weather_app.bat", "start_weather_app.vbs",
+                    "main.py", "city_search.py", "requirements.txt", "start_weather_app.bat", "start_weather_app.vbs",
                 ):
                     with self.subTest(name=name):
                         path = root / name

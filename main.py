@@ -17,14 +17,15 @@ import webbrowser
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from http.client import IncompleteRead
+from io import BytesIO
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from tkinter import messagebox
 from tkinter import font as tkfont
 from typing import Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from city_search import CitySearch, fit_text
 
@@ -98,7 +99,7 @@ def _runtime_file_signature() -> tuple[tuple[str, str], ...] | None:
 
     files = [
         PROJECT_DIR / name for name in (
-            "main.py", "city_search.py", "app_metadata.json",
+            "main.py", "city_search.py", "app_metadata.json", "requirements.txt",
             "start_weather_app.bat", "start_weather_app.vbs",
             "assets/app.ico", "assets/logo.png",
         )
@@ -625,6 +626,37 @@ def save_settings(settings: dict) -> bool:
         return False
 
 
+class _HTTPSRedirectHandler(HTTPRedirectHandler):
+    def http_error_302(self, request, response, code, message, headers):
+        # urllib otherwise drains redirect bodies with an unbounded read().
+        # This client never uses error/redirect bodies, so close the socket and
+        # let the standard redirect parser and loop guard use an empty stream.
+        response.close()
+        return super().http_error_302(request, BytesIO(), code, message, headers)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        if request.type == "https" and urlsplit(new_url).scheme != "https":
+            raise HTTPError(
+                request.full_url, code,
+                "Sääpalvelu ohjasi suojatun yhteyden suojaamattomaan osoitteeseen.",
+                headers, response,
+            )
+        # Python 3.10's handler does not know 308 and loses HEAD on redirects.
+        # For our bodyless methods, 307 provides the same redirect semantics.
+        parent_code = 307 if code == 308 and request.get_method() in {"GET", "HEAD"} else code
+        redirected = super().redirect_request(request, response, parent_code, message, headers, new_url)
+        if redirected is not None and request.get_method() == "HEAD":
+            redirected.method = "HEAD"
+        return redirected
+
+
+def _open_weather_request(request: Request, *, timeout: float, context: ssl.SSLContext):
+    opener = build_opener(HTTPSHandler(context=context), _HTTPSRedirectHandler())
+    return opener.open(request, timeout=timeout)
+
+
 def _create_https_context() -> ssl.SSLContext:
     try:
         version = tuple(int(part) for part in getattr(certifi, "__version__", "").split("."))
@@ -660,15 +692,20 @@ def _get_json(url: str, params: dict) -> dict:
         },
     )
     try:
-        with urlopen(request, timeout=12, context=_create_https_context()) as response:
+        with _open_weather_request(request, timeout=12, context=_create_https_context()) as response:
             raw_payload = response.read(MAX_JSON_RESPONSE_BYTES + 1)
+            if len(raw_payload) > MAX_JSON_RESPONSE_BYTES:
+                raise WeatherServiceError("Sääpalvelun vastaus oli liian suuri.")
+            # HTTPResponse.read(amt) can return early EOF without enforcing the
+            # declared Content-Length. Preserve this as a retryable transport
+            # error, even when the received prefix happens to be valid JSON.
+            remaining = getattr(response, "length", None)
+            if isinstance(remaining, int) and remaining > 0:
+                raise IncompleteRead(raw_payload, remaining)
             charset = response.headers.get_content_charset() or "utf-8"
     except HTTPError as error:
         error.close()
         raise
-
-    if len(raw_payload) > MAX_JSON_RESPONSE_BYTES:
-        raise WeatherServiceError("Sääpalvelun vastaus oli liian suuri.")
 
     try:
         payload = json.loads(raw_payload.decode(charset))
@@ -1445,9 +1482,12 @@ def check_github_update_status() -> dict:
             ),
         }
 
-    _git_output(["fetch", UPDATE_REMOTE, UPDATE_BRANCH], timeout=60)
-    local_sha = _git_output(["rev-parse", "HEAD"])
     remote_ref = f"{UPDATE_REMOTE}/{UPDATE_BRANCH}"
+    # Refresh the exact tracking ref even if the checkout has a custom or
+    # single-branch fetch mapping. Only the remote-tracking ref may be rewritten.
+    refspec = f"+refs/heads/{UPDATE_BRANCH}:refs/remotes/{remote_ref}"
+    _git_output(["fetch", UPDATE_REMOTE, refspec], timeout=60)
+    local_sha = _git_output(["rev-parse", "HEAD"])
     remote_sha = _git_output(["rev-parse", remote_ref])
     if local_sha == remote_sha:
         return {"state": "current", "message": f"Sovellus on ajan tasalla. Versio: {APP_VERSION_DATE}."}
@@ -1512,6 +1552,9 @@ class WeatherWidget(tk.Tk):
     def __init__(self) -> None:
         register_app_fonts()
         super().__init__()
+        # Tk scales point-sized fonts automatically; our canvas and image sizes
+        # use logical pixels at 96 DPI and must follow the same display scale.
+        self.ui_scale = max(1.0, round(float(self.tk.call("tk", "scaling")) / (96 / 72), 2))
 
         self.settings = load_settings()
         self.unit_symbol = "C" if self.settings.get("temperature_unit") == "celsius" else "F"
@@ -1553,10 +1596,10 @@ class WeatherWidget(tk.Tk):
         self.tray_icon = None
         self.popup_bg_photo = None
         self.weather_icon_photo_cache: dict[tuple[str, int, int], tk.PhotoImage] = {}
-        self.rain_mm_umbrella_icon_photo = build_metric_icon_photo("umbrella", 14, 14)
-        self.rain_prob_drop_icon_photo = build_metric_icon_photo("drop", 12, 14)
-        self.humidity_fog_icon_photo = build_metric_icon_photo("fog", 16, 14)
-        self.wind_swirl_icon_photo = build_metric_icon_photo("wind", 18, 14)
+        self.rain_mm_umbrella_icon_photo = build_metric_icon_photo("umbrella", self._px(14), self._px(14))
+        self.rain_prob_drop_icon_photo = build_metric_icon_photo("drop", self._px(12), self._px(14))
+        self.humidity_fog_icon_photo = build_metric_icon_photo("fog", self._px(16), self._px(14))
+        self.wind_swirl_icon_photo = build_metric_icon_photo("wind", self._px(18), self._px(14))
         self.sunrise_sun_icon_photo = self._weather_icon_photo("sun", SUN_EVENT_ICON_SIZE, SUN_EVENT_ICON_SIZE)
         self.sunset_moon_icon_photo = self._weather_icon_photo("moon", SUN_EVENT_ICON_SIZE, SUN_EVENT_ICON_SIZE)
         self.popup_bg_size: tuple[int, int, str] | None = None
@@ -1580,6 +1623,9 @@ class WeatherWidget(tk.Tk):
         if not IS_FROZEN:
             self.update_job = self.after(UPDATE_CHECK_DELAY_MS, self.check_for_app_update)
         self.startup_job = self.after(1500, self._refresh_startup_shortcut_if_enabled)
+
+    def _px(self, value: float) -> int:
+        return round(value * vars(self).get("ui_scale", 1.0))
 
     def _persist_settings(self) -> None:
         was_pending = self._settings_save_pending
@@ -1614,7 +1660,8 @@ class WeatherWidget(tk.Tk):
 
     def _weather_icon_photo(self, icon_key: str, width: int, height: int):
         normalized = _normalize_weather_icon_key(icon_key)
-        cache_key = (normalized, int(width), int(height))
+        width, height = self._px(width), self._px(height)
+        cache_key = (normalized, width, height)
         cached = self.weather_icon_photo_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -1635,7 +1682,7 @@ class WeatherWidget(tk.Tk):
     ) -> None:
         photo = self._weather_icon_photo(icon_key, width, height)
         if photo is not None:
-            label.config(image=photo, text="", width=width, height=height)
+            label.config(image=photo, text="", width=self._px(width), height=self._px(height))
             return
 
         label.config(image="", text=fallback_symbol, width=0, height=0, fg=accent)
@@ -2014,8 +2061,8 @@ class WeatherWidget(tk.Tk):
         super().destroy()
 
     def _build_widget_ui(self) -> None:
-        self.geometry("322x84")
-        shell = tk.Frame(self, bg=DARK_BG, padx=8, pady=8)
+        self.geometry(f"{self._px(322)}x{self._px(84)}")
+        shell = tk.Frame(self, bg=DARK_BG, padx=self._px(8), pady=self._px(8))
         shell.pack(fill="both", expand=True)
 
         card = tk.Frame(
@@ -2023,8 +2070,8 @@ class WeatherWidget(tk.Tk):
             bg=SURFACE_BG,
             highlightthickness=1,
             highlightbackground=BORDER_COLOR,
-            padx=12,
-            pady=8,
+            padx=self._px(12),
+            pady=self._px(8),
             cursor="hand2",
         )
         card.pack(fill="both", expand=True)
@@ -2056,7 +2103,7 @@ class WeatherWidget(tk.Tk):
             fg=TEXT_PRIMARY,
             bg=SURFACE_BG,
         )
-        self.widget_temp_label.pack(side="left", padx=(10, 0))
+        self.widget_temp_label.pack(side="left", padx=(self._px(10), 0))
         self.widget_temp_label.bind("<Button-1>", lambda _event: self.toggle_popup())
 
         self.widget_city_label = tk.Label(
@@ -2066,7 +2113,7 @@ class WeatherWidget(tk.Tk):
             fg=TEXT_PRIMARY,
             bg=SURFACE_BG,
         )
-        self.widget_city_label.pack(anchor="w", pady=(4, 0))
+        self.widget_city_label.pack(anchor="w", pady=(self._px(4), 0))
         self.widget_city_label.bind("<Button-1>", lambda _event: self.toggle_popup())
 
         self.widget_condition_label = tk.Label(
@@ -2076,14 +2123,14 @@ class WeatherWidget(tk.Tk):
             fg=TEXT_MUTED,
             bg=SURFACE_BG,
         )
-        self.widget_condition_label.pack(anchor="w", pady=(2, 0))
+        self.widget_condition_label.pack(anchor="w", pady=(self._px(2), 0))
         self.widget_condition_label.bind("<Button-1>", lambda _event: self.toggle_popup())
 
         right = tk.Frame(card, bg=SURFACE_BG)
         right.pack(side="right", anchor="n")
 
         self._create_icon_button(right, "⟳", self.refresh_weather).pack(side="top")
-        self._create_icon_button(right, "✕", self.destroy).pack(side="top", pady=(8, 0))
+        self._create_icon_button(right, "✕", self.destroy).pack(side="top", pady=(self._px(8), 0))
         self._configure_weather_label(self.widget_icon_label, "moon", 42, 42, "🌙", ACCENT_GOLD)
 
     def _build_popup(self) -> None:
@@ -2302,7 +2349,7 @@ class WeatherWidget(tk.Tk):
             bg=POPUP_INPUT_BG,
             bd=0,
             highlightthickness=0,
-            padx=5,
+            padx=self._px(5),
             pady=0,
         )
         self.location_entry = tk.Entry(
@@ -2318,7 +2365,7 @@ class WeatherWidget(tk.Tk):
             justify="left",
             width=16,
         )
-        self.location_entry.pack(side="left", fill="both", expand=True, ipady=2)
+        self.location_entry.pack(side="left", fill="both", expand=True, ipady=self._px(2))
 
         self.search_button = self._create_icon_button(
             self.popup_bg_canvas, "Hae", None, width=4,
@@ -2330,7 +2377,7 @@ class WeatherWidget(tk.Tk):
             search=search_cities, submit=self.refresh_weather,
             dispatch=self._call_on_ui_thread, start_worker=self._start_background_worker,
             font=(TEXT_FONT, 10), background=POPUP_INPUT_BG,
-            max_query_length=MAX_CITY_QUERY_LENGTH,
+            max_query_length=MAX_CITY_QUERY_LENGTH, scale=self.ui_scale,
         )
         self.city_search.chosen_place = self.latest_place
         self.search_button.configure(command=self.city_search.confirm)
@@ -2353,28 +2400,28 @@ class WeatherWidget(tk.Tk):
             0,
             window=self.location_entry_shell,
             anchor="ne",
-            height=POPUP_CONTROL_HEIGHT,
+            height=max(self._px(POPUP_CONTROL_HEIGHT), self.location_entry_shell.winfo_reqheight()),
         )
         self.search_button_window = self.popup_bg_canvas.create_window(
             0,
             0,
             window=self.search_button,
             anchor="ne",
-            height=POPUP_CONTROL_HEIGHT,
+            height=max(self._px(POPUP_CONTROL_HEIGHT), self.search_button.winfo_reqheight()),
         )
         self.refresh_button_window = self.popup_bg_canvas.create_window(
             0,
             0,
             window=self.refresh_button,
             anchor="ne",
-            height=POPUP_CONTROL_HEIGHT,
+            height=max(self._px(POPUP_CONTROL_HEIGHT), self.refresh_button.winfo_reqheight()),
         )
         self.close_button_window = self.popup_bg_canvas.create_window(
             0,
             0,
             window=self.close_button,
             anchor="ne",
-            height=POPUP_CONTROL_HEIGHT,
+            height=max(self._px(POPUP_CONTROL_HEIGHT), self.close_button.winfo_reqheight()),
         )
         self.popup_bg_canvas.bind("<Configure>", self._on_popup_canvas_configure)
         self.popup.update_idletasks()
@@ -2394,14 +2441,15 @@ class WeatherWidget(tk.Tk):
         )
 
     def _layout_popup_content(self, width: int, height: int) -> None:
-        pad = POPUP_CONTENT_PAD + 8
-        left_nudge = 5
+        px = self._px
+        pad = px(POPUP_CONTENT_PAD + 8)
+        left_nudge = px(5)
 
-        self.popup_bg_canvas.coords(self.clock_label, pad + left_nudge, 12)
+        self.popup_bg_canvas.coords(self.clock_label, pad + left_nudge, px(12))
         self.popup_bg_canvas.itemconfigure(self.clock_label, text=self.clock_var.get())
-        self.popup_bg_canvas.coords(self.hero_updated_label, pad + left_nudge, 32)
+        self.popup_bg_canvas.coords(self.hero_updated_label, pad + left_nudge, px(32))
 
-        control_y = 12
+        control_y = px(12)
         right = width - pad
         for item, control, gap in (
             (self.close_button_window, self.close_button, 4),
@@ -2409,35 +2457,38 @@ class WeatherWidget(tk.Tk):
             (self.search_button_window, self.search_button, 6),
             (self.location_entry_window, self.location_entry_shell, 8),
         ):
+            self.popup_bg_canvas.itemconfigure(
+                item, height=max(px(POPUP_CONTROL_HEIGHT), control.winfo_reqheight()),
+            )
             self.popup_bg_canvas.coords(item, right, control_y)
-            right -= control.winfo_reqwidth() + gap
-        self.popup_bg_canvas.coords(self.location_label, right, control_y + 4)
+            right -= control.winfo_reqwidth() + px(gap)
+        self.popup_bg_canvas.coords(self.location_label, right, control_y + px(4))
         label_bbox = self.popup_bg_canvas.bbox(self.location_label)
-        label_width = (label_bbox[2] - label_bbox[0]) if label_bbox else 56
-        self.popup_bg_canvas.coords(self.theme_dot_item, right - label_width - 8, control_y + 2)
+        label_width = (label_bbox[2] - label_bbox[0]) if label_bbox else px(56)
+        self.popup_bg_canvas.coords(self.theme_dot_item, right - label_width - px(8), control_y + px(2))
 
-        self.popup_bg_canvas.coords(self.hero_city_label, pad + left_nudge, 57)
-        self.popup_bg_canvas.coords(self.hero_icon_label, pad + 8 + left_nudge, 157)
-        self.popup_bg_canvas.coords(self.hero_temp_label, pad + 116 + left_nudge, 95)
+        self.popup_bg_canvas.coords(self.hero_city_label, pad + left_nudge, px(57))
+        self.popup_bg_canvas.coords(self.hero_icon_label, pad + px(8) + left_nudge, px(157))
+        self.popup_bg_canvas.coords(self.hero_temp_label, pad + px(116) + left_nudge, px(95))
 
-        right_text = width - pad - 14
-        right_stack_top = 58
+        right_text = width - pad - px(14)
+        right_stack_top = px(58)
         self._layout_today_weather_stack(right_text, right_stack_top)
 
-        forecast_top = height - 116
-        forecast_side_inset = 12
+        forecast_top = height - px(116)
+        forecast_side_inset = px(12)
         forecast_left = pad + forecast_side_inset
         usable_width = max(1, width - (forecast_left * 2))
         col_width = usable_width / max(1, POPUP_FORECAST_DAYS)
         for index, card in enumerate(self.forecast_cards):
             center_x = int(forecast_left + (index + 0.5) * col_width)
             card["center_x"] = center_x
-            card["icon_y"] = forecast_top + 22
+            card["icon_y"] = forecast_top + px(22)
             self.popup_bg_canvas.coords(card["day"], center_x, forecast_top)
             self.popup_bg_canvas.coords(card["icon"], center_x, card["icon_y"])
-            self.popup_bg_canvas.coords(card["temp"], center_x, forecast_top + 68)
+            self.popup_bg_canvas.coords(card["temp"], center_x, forecast_top + px(68))
 
-        self.popup_bg_canvas.coords(self.footer_label, width - pad, height - 7)
+        self.popup_bg_canvas.coords(self.footer_label, width - pad, height - px(7))
         self._fit_city_label()
         self.city_search.reposition()
 
@@ -2447,7 +2498,7 @@ class WeatherWidget(tk.Tk):
         city_coords = canvas.coords(self.hero_city_label)
         if not condition_bounds or not city_coords:
             return
-        available = max(0, condition_bounds[0] - city_coords[0] - 16)
+        available = max(0, condition_bounds[0] - city_coords[0] - self._px(16))
         font = self.city_label_font
         text = self.city_label_text
         if "," in text and font.measure(text) > available:
@@ -2455,18 +2506,19 @@ class WeatherWidget(tk.Tk):
         canvas.itemconfigure(self.hero_city_label, text=fit_text(text, available, font.measure))
 
     def _layout_today_weather_stack(self, right_text: int, right_stack_top: int) -> None:
-        self.popup_bg_canvas.coords(self.today_condition_label, right_text - 4, right_stack_top + 2)
-        self.popup_bg_canvas.coords(self.today_hilo_label, right_text, right_stack_top + 38)
-        sun_row_y = right_stack_top + 67
-        icon_time_gap = 4
-        sun_event_icon_y_offset = 5
-        sun_event_icon_left_nudge = 3
-        sunrise_icon_extra_left_nudge = 1
-        group_gap = 16
+        px = self._px
+        self.popup_bg_canvas.coords(self.today_condition_label, right_text - px(4), right_stack_top + px(2))
+        self.popup_bg_canvas.coords(self.today_hilo_label, right_text, right_stack_top + px(38))
+        sun_row_y = right_stack_top + px(67)
+        icon_time_gap = px(4)
+        sun_event_icon_y_offset = px(5)
+        sun_event_icon_left_nudge = px(3)
+        sunrise_icon_extra_left_nudge = px(1)
+        group_gap = px(16)
         self.popup_bg_canvas.coords(self.today_sunset_time_label, right_text, sun_row_y)
         # Canvas bounds update synchronously; do not run nested idle callbacks.
         sunset_bbox = self.popup_bg_canvas.bbox(self.today_sunset_time_label)
-        sunset_left = sunset_bbox[0] if sunset_bbox else (right_text - 36)
+        sunset_left = sunset_bbox[0] if sunset_bbox else (right_text - px(36))
 
         self.popup_bg_canvas.coords(
             self.today_moon_icon_label,
@@ -2474,62 +2526,63 @@ class WeatherWidget(tk.Tk):
             sun_row_y + sun_event_icon_y_offset,
         )
         moon_bbox = self.popup_bg_canvas.bbox(self.today_moon_icon_label)
-        moon_left = moon_bbox[0] if moon_bbox else (sunset_left - 14)
+        moon_left = moon_bbox[0] if moon_bbox else (sunset_left - px(14))
 
         self.popup_bg_canvas.coords(self.today_sunrise_time_label, moon_left - group_gap, sun_row_y)
         sunrise_bbox = self.popup_bg_canvas.bbox(self.today_sunrise_time_label)
-        sunrise_left = sunrise_bbox[0] if sunrise_bbox else (moon_left - 42)
+        sunrise_left = sunrise_bbox[0] if sunrise_bbox else (moon_left - px(42))
 
         self.popup_bg_canvas.coords(
             self.today_sun_icon_label,
             sunrise_left - icon_time_gap - sun_event_icon_left_nudge - sunrise_icon_extra_left_nudge,
             sun_row_y + sun_event_icon_y_offset,
         )
-        self._layout_today_stats(right_text, right_stack_top + 91)
+        self._layout_today_stats(right_text, right_stack_top + px(91))
 
     def _layout_today_stats(self, right_x: int, top_y: int) -> None:
-        icon_value_gap = 4
-        item_gap = 14
-        top_icon_y_offset = 6
-        wind_icon_y_offset = 4
+        px = self._px
+        icon_value_gap = px(4)
+        item_gap = px(14)
+        top_icon_y_offset = px(6)
+        wind_icon_y_offset = px(4)
         try:
             line_height = self.stats_font.metrics("linespace")
         except tk.TclError:
-            line_height = 14
+            line_height = px(14)
 
         # Top row: humidity (right), rain probability (middle), rain mm (left).
         self.popup_bg_canvas.coords(self.today_humidity_value_label, right_x, top_y)
         humidity_bbox = self.popup_bg_canvas.bbox(self.today_humidity_value_label)
-        humidity_left = humidity_bbox[0] if humidity_bbox else (right_x - 24)
+        humidity_left = humidity_bbox[0] if humidity_bbox else (right_x - px(24))
         self.popup_bg_canvas.coords(
             self.today_humidity_icon_label,
             humidity_left - icon_value_gap,
             top_y + top_icon_y_offset,
         )
         humidity_icon_bbox = self.popup_bg_canvas.bbox(self.today_humidity_icon_label)
-        cursor = (humidity_icon_bbox[0] if humidity_icon_bbox else (humidity_left - 14)) - item_gap
+        cursor = (humidity_icon_bbox[0] if humidity_icon_bbox else (humidity_left - px(14))) - item_gap
 
         self.popup_bg_canvas.coords(self.today_rain_prob_value_label, cursor, top_y)
         rain_prob_bbox = self.popup_bg_canvas.bbox(self.today_rain_prob_value_label)
-        rain_prob_left = rain_prob_bbox[0] if rain_prob_bbox else (cursor - 20)
+        rain_prob_left = rain_prob_bbox[0] if rain_prob_bbox else (cursor - px(20))
         self.popup_bg_canvas.coords(
             self.today_rain_prob_icon_label,
             rain_prob_left - icon_value_gap,
             top_y + top_icon_y_offset,
         )
         rain_prob_icon_bbox = self.popup_bg_canvas.bbox(self.today_rain_prob_icon_label)
-        cursor = (rain_prob_icon_bbox[0] if rain_prob_icon_bbox else (rain_prob_left - 12)) - item_gap
+        cursor = (rain_prob_icon_bbox[0] if rain_prob_icon_bbox else (rain_prob_left - px(12))) - item_gap
 
         self.popup_bg_canvas.coords(self.today_rain_mm_value_label, cursor, top_y)
         rain_mm_bbox = self.popup_bg_canvas.bbox(self.today_rain_mm_value_label)
-        rain_mm_left = rain_mm_bbox[0] if rain_mm_bbox else (cursor - 42)
-        self.popup_bg_canvas.coords(self.today_rain_mm_icon_label, rain_mm_left - icon_value_gap, top_y + 2)
+        rain_mm_left = rain_mm_bbox[0] if rain_mm_bbox else (cursor - px(42))
+        self.popup_bg_canvas.coords(self.today_rain_mm_icon_label, rain_mm_left - icon_value_gap, top_y + px(2))
 
         # Second row: wind.
-        wind_y = top_y + line_height + 2
+        wind_y = top_y + line_height + px(2)
         self.popup_bg_canvas.coords(self.today_wind_value_label, right_x, wind_y)
         wind_bbox = self.popup_bg_canvas.bbox(self.today_wind_value_label)
-        wind_left = wind_bbox[0] if wind_bbox else (right_x - 72)
+        wind_left = wind_bbox[0] if wind_bbox else (right_x - px(72))
         self.popup_bg_canvas.coords(
             self.today_wind_icon_label,
             wind_left - icon_value_gap,
@@ -2574,6 +2627,7 @@ class WeatherWidget(tk.Tk):
             delete_object.argtypes = [wintypes.HGDIOBJ]
             delete_object.restype = wintypes.BOOL
 
+            radius = self._px(radius)
             region = create_region(0, 0, width + 1, height + 1, radius, radius)
             if region and not set_window_region(hwnd, region, True):
                 delete_object(region)
@@ -2609,10 +2663,10 @@ class WeatherWidget(tk.Tk):
         self.update_idletasks()
         if self._is_destroying:
             return
-        width = max(322, self.winfo_reqwidth())
-        height = max(84, self.winfo_reqheight())
-        x_pos = max(0, self.winfo_screenwidth() - width - 20)
-        y_pos = max(0, self.winfo_screenheight() - height - 70)
+        width = max(self._px(322), self.winfo_reqwidth())
+        height = max(self._px(84), self.winfo_reqheight())
+        x_pos = max(0, self.winfo_screenwidth() - width - self._px(20))
+        y_pos = max(0, self.winfo_screenheight() - height - self._px(70))
         self.geometry(f"{width}x{height}+{x_pos}+{y_pos}")
         if self.popup and self.popup.winfo_viewable():
             self._position_popup()
@@ -2621,8 +2675,8 @@ class WeatherWidget(tk.Tk):
         if self._is_destroying or not self.popup:
             return
 
-        popup_width = 584
-        popup_height = 329
+        popup_width = self._px(584)
+        popup_height = self._px(329)
 
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
@@ -2639,14 +2693,14 @@ class WeatherWidget(tk.Tk):
         except Exception:
             pass
 
-        available_width = max(1, right - left - 10)
+        available_width = max(1, right - left - self._px(10))
         popup_width = min(popup_width, available_width)
 
-        available_height = max(1, bottom - top - 10)
+        available_height = max(1, bottom - top - self._px(10))
         popup_height = min(popup_height, available_height)
 
-        x_pos = max(left + 5, right - popup_width - 5)
-        y_pos = max(top + 3, bottom - popup_height - 3)
+        x_pos = max(left + self._px(5), right - popup_width - self._px(5))
+        y_pos = max(top + self._px(3), bottom - popup_height - self._px(3))
 
         self.popup.geometry(f"{popup_width}x{popup_height}+{x_pos}+{y_pos}")
         self.popup.update_idletasks()
@@ -2974,8 +3028,8 @@ class WeatherWidget(tk.Tk):
 
         condition_coords = self.popup_bg_canvas.coords(self.today_condition_label)
         if condition_coords:
-            right_text = int(condition_coords[0]) + 4
-            right_stack_top = int(condition_coords[1]) - 2
+            right_text = int(condition_coords[0]) + self._px(4)
+            right_stack_top = int(condition_coords[1]) - self._px(2)
             self._layout_today_weather_stack(right_text, right_stack_top)
         self._fit_city_label()
 

@@ -294,6 +294,29 @@ try {
     }
 
     & {
+        $locationCommands = foreach ($scriptName in @('build_release.ps1', 'publish_release.ps1')) {
+            $command = (Get-ScriptAst $scriptName).Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -eq 'Set-Location'
+            }, $true)
+            Assert-True ($null -ne $command) "Project directory selection not found: $scriptName"
+            [scriptblock]::Create($command.Extent.Text)
+        }
+        $root = Join-Path $testDir ('source [literal] ' + [char]0x00e4 + [char]0x6771 + [char]0x4eac)
+        New-Item -ItemType Directory -Path $root | Out-Null
+        Push-Location -LiteralPath $testDir
+        try {
+            foreach ($command in $locationCommands) {
+                & $command
+                Assert-True ($PWD.Path -eq $root) 'Build/publish did not enter the literal project directory'
+                Set-Location -LiteralPath $testDir
+            }
+        }
+        finally { Pop-Location }
+    }
+
+    & {
         . (Get-ScriptFunctions 'build_release.ps1')
         $metadataPath = Join-Path $testDir 'app_metadata.json'
         [System.IO.File]::WriteAllText($metadataPath, '{"version":"1.2.3","date":"07.09.2026"}')
@@ -458,7 +481,91 @@ try {
         finally { Pop-Location }
     }
     & {
-        . (Get-ScriptFunctions '.github/scripts/publish-release.ps1')
+        . (Get-ScriptFunctions 'publish_release.ps1')
+        $origin = Join-Path $testDir 'release-origin.git'
+        $repository = Join-Path $testDir 'release retry [literal]'
+        $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('init', '--bare', $origin)
+        $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('init', '-b', 'main', $repository)
+        Push-Location -LiteralPath $repository
+        try {
+            foreach ($entry in @(
+                @('user.name', 'Release Test'), @('user.email', 'release@example.invalid'),
+                @('commit.gpgsign', 'false'), @('tag.gpgsign', 'false'),
+                @('core.hooksPath', (Join-Path $testDir 'no-release-hooks'))
+            )) {
+                $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('config', $entry[0], $entry[1])
+            }
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('commit', '--allow-empty', '-m', 'first')
+            $firstCommit = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('commit', '--allow-empty', '-m', 'second')
+            $secondCommit = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('remote', 'add', 'origin', $origin)
+
+            # Only this temporary repository and its local bare origin receive tags.
+            Publish-LocalReleaseTag -Tag 'v1.2.3' -Commit $firstCommit
+            $tagObject = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'refs/tags/v1.2.3')
+            Publish-LocalReleaseTag -Tag 'v1.2.3' -Commit $firstCommit
+            Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'refs/tags/v1.2.3')) -eq $tagObject) 'Retry rewrote an existing release tag'
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('tag', '-d', 'v1.2.3')
+            Publish-LocalReleaseTag -Tag 'v1.2.3' -Commit $firstCommit
+            Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'refs/tags/v1.2.3')) -eq $tagObject) 'Remote-only retry did not fetch the original release tag'
+
+            $originalInvoke = (Get-Command Invoke-RequiredCommand).ScriptBlock
+            $interruption = @{ Operation = ''; Pending = $false }
+            function Invoke-RequiredCommand {
+                param([string]$Command, [string[]]$Arguments)
+                if ($interruption.Pending -and $Arguments[0] -eq $interruption.Operation) {
+                    $interruption.Pending = $false
+                    throw 'simulated interrupted tag publication'
+                }
+                & $originalInvoke -Command $Command -Arguments $Arguments
+            }
+            foreach ($case in @(
+                @{ Operation = 'tag'; Tag = 'v1.2.4' },
+                @{ Operation = 'push'; Tag = 'v1.2.5' }
+            )) {
+                $interruption.Operation = $case.Operation
+                $interruption.Pending = $true
+                $rejected = $false
+                try { Publish-LocalReleaseTag -Tag $case.Tag -Commit $firstCommit }
+                catch { $rejected = $_.Exception.Message -eq 'simulated interrupted tag publication' }
+                Assert-True $rejected 'Simulated tag/push interruption was not reported'
+                Publish-LocalReleaseTag -Tag $case.Tag -Commit $firstCommit
+                $localObject = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', "refs/tags/$($case.Tag)")
+                $remoteObject = Get-RequiredCommandOutput -Command 'git' -Arguments @('ls-remote', '--tags', 'origin', "refs/tags/$($case.Tag)")
+                Assert-True ($remoteObject.StartsWith("$localObject`t")) 'Retry did not publish the original local tag'
+            }
+            foreach ($case in @(
+                @{ Tag = 'v1.2.6'; Target = $firstCommit; Message = 'foreign annotation'; Requested = $firstCommit },
+                @{ Tag = 'v1.2.7'; Target = $firstCommit; Message = '[local-release]'; Requested = $secondCommit },
+                @{ Tag = 'v1.2.8'; Target = $firstCommit; Message = $null; Requested = $firstCommit }
+            )) {
+                $arguments = @('tag')
+                if ($case.Message) { $arguments += @('-a', '-m', $case.Message) }
+                $arguments += @($case.Tag, $case.Target)
+                $null = Get-RequiredCommandOutput -Command 'git' -Arguments $arguments
+                $before = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', "refs/tags/$($case.Tag)")
+                $rejected = $false
+                try { Publish-LocalReleaseTag -Tag $case.Tag -Commit $case.Requested } catch { $rejected = $true }
+                Assert-True $rejected 'Publishing reused a foreign, lightweight, or wrong-commit tag'
+                Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', "refs/tags/$($case.Tag)")) -eq $before) 'Rejected publication changed the local tag'
+                Assert-True (-not (Get-RequiredCommandOutput -Command 'git' -Arguments @('ls-remote', '--tags', 'origin', "refs/tags/$($case.Tag)"))) 'Rejected tag was pushed'
+            }
+
+            Publish-LocalReleaseTag -Tag 'v1.2.9' -Commit $firstCommit
+            $remoteBefore = Get-RequiredCommandOutput -Command 'git' -Arguments @('ls-remote', '--tags', 'origin', 'refs/tags/v1.2.9')
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('tag', '-d', 'v1.2.9')
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('tag', '-a', 'v1.2.9', $firstCommit, '-m', 'different object [local-release]')
+            $rejected = $false
+            try { Publish-LocalReleaseTag -Tag 'v1.2.9' -Commit $firstCommit } catch { $rejected = $true }
+            Assert-True $rejected 'Publishing accepted different local and remote tag objects for the same commit'
+            Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('ls-remote', '--tags', 'origin', 'refs/tags/v1.2.9')) -eq $remoteBefore) 'Rejected publication rewrote the remote tag'
+        }
+        finally { Pop-Location }
+    }
+
+    & {
+        . (Get-ScriptFunctions '.github/scripts/release-assets.ps1')
         $artifacts = @((Join-Path $testDir 'app.zip'), (Join-Path $testDir 'SHA256SUMS.txt'))
         foreach ($artifact in $artifacts) { [System.IO.File]::WriteAllText($artifact, 'test artifact') }
         $draftJson = '{"tagName":"v1.2.3","isDraft":true}'
@@ -475,7 +582,11 @@ try {
             @{ Name = 'upload failure'; Json = $draftJson; Fail = 'upload'; Calls = 'view,upload'; Reject = $true },
             @{ Name = 'version lookup failure'; Json = $draftJson; Fail = 'api'; Calls = 'view,upload,api'; Reject = $true },
             @{ Name = 'unrecognized stable tag'; Json = $draftJson; Published = @('stable'); Calls = 'view,upload,api'; Reject = $true },
-            @{ Name = 'publish failure'; Json = $draftJson; Fail = 'edit'; Calls = 'view,upload,api,edit'; Reject = $true; Latest = 'true' }
+            @{ Name = 'publish failure'; Json = $draftJson; Fail = 'edit'; Calls = 'view,upload,api,edit'; Reject = $true; Latest = 'true' },
+            @{ Name = 'keep draft'; Json = $draftJson; Draft = $true; Calls = 'view,upload,edit'; Reject = $false },
+            @{ Name = 'new prerelease'; Json = ''; Fail = 'view'; Prerelease = $true; Calls = 'view,create,upload,edit'; Reject = $false; Latest = 'false' },
+            @{ Name = 'retry prerelease'; Json = $draftJson; Prerelease = $true; Calls = 'view,upload,edit'; Reject = $false; Latest = 'false' },
+            @{ Name = 'prerelease draft'; Json = $draftJson; Draft = $true; Prerelease = $true; Calls = 'view,upload,edit'; Reject = $false }
         )) {
             $calls = New-Object 'System.Collections.Generic.List[string]'
             function gh {
@@ -489,6 +600,7 @@ try {
                     'view' { return $case.Json }
                     'create' {
                         Assert-True ($args -contains '--draft' -and $args -contains '--verify-tag') 'Release was not created as a verified draft'
+                        Assert-True (($args -contains '--prerelease') -eq [bool]$case.Prerelease) 'New release lost its prerelease flag'
                     }
                     'upload' {
                         Assert-True ($args -contains '--clobber') 'Draft retry cannot replace incomplete assets'
@@ -497,7 +609,15 @@ try {
                         }
                     }
                     'edit' {
-                        Assert-True ($args -contains '--draft=false' -and $args -contains "--latest=$($case.Latest)") 'Release changed latest incorrectly'
+                        $draftFlag = "--draft=$(([bool]$case.Draft).ToString().ToLowerInvariant())"
+                        $prereleaseFlag = "--prerelease=$(([bool]$case.Prerelease).ToString().ToLowerInvariant())"
+                        Assert-True ($args -contains $draftFlag -and $args -contains $prereleaseFlag) 'Release lost its draft/prerelease flags'
+                        if ($case.Draft) {
+                            Assert-True (-not ($args | Where-Object { $_ -like '--latest=*' })) 'Draft changed Latest'
+                        }
+                        else {
+                            Assert-True ($args -contains "--latest=$($case.Latest)") 'Release changed Latest incorrectly'
+                        }
                     }
                     'api' {
                         Assert-True ($args[1] -ceq 'repos/{owner}/{repo}/releases?per_page=100') 'Unexpected release endpoint'
@@ -510,7 +630,7 @@ try {
             }
             $rejected = $false
             $errorMessage = ''
-            try { Publish-ReleaseAssets -Tag 'v1.2.3' -Artifacts $artifacts }
+            try { Publish-ReleaseAssets -Tag 'v1.2.3' -Artifacts $artifacts -Draft:([bool]$case.Draft) -Prerelease:([bool]$case.Prerelease) }
             catch { $rejected = $true; $errorMessage = $_.Exception.Message }
             Assert-True ($rejected -eq $case.Reject) "Wrong release result: $($case.Name): $errorMessage"
             Assert-True (($calls -join ',') -ceq $case.Calls) "Unsafe release command sequence: $($case.Name): $calls"
@@ -527,6 +647,70 @@ try {
             Assert-True $rejected 'Publishing accepted invalid tag or missing artifacts'
         }
         Assert-True ($calls.Count -eq 0) 'Invalid input reached GitHub'
+    }
+    & {
+        . (Get-ScriptFunctions '.github/scripts/release-assets.ps1')
+        $artifacts = @((Join-Path $testDir 'retry-app.zip'), (Join-Path $testDir 'retry-SHA256SUMS.txt'))
+        foreach ($artifact in $artifacts) { [System.IO.File]::WriteAllText($artifact, 'test artifact') }
+        foreach ($operation in @('create', 'upload', 'api', 'edit')) {
+            $state = @{ Exists = $false; Draft = $true; Pending = $true; Uploaded = 0 }
+            function gh {
+                $command = if ($args[0] -eq 'api') { 'api' } else { $args[1] }
+                $global:LASTEXITCODE = 0
+                if ($command -eq 'view') {
+                    if (-not $state.Exists) { $global:LASTEXITCODE = 1; return }
+                    return (@{ tagName = 'v1.2.3'; isDraft = $state.Draft } | ConvertTo-Json -Compress)
+                }
+                if ($state.Pending -and $command -eq $operation) {
+                    $state.Pending = $false
+                    $global:LASTEXITCODE = 1
+                    return
+                }
+                switch ($command) {
+                    'create' {
+                        Assert-True ($args -contains '--draft') 'Retry exposed a partial public release'
+                        $state.Exists = $true
+                    }
+                    'upload' {
+                        Assert-True ($state.Exists -and $state.Draft -and $args -contains '--clobber') 'Retry changed published assets'
+                        $state.Uploaded += 1
+                    }
+                    'api' { return 'v1.2.2' }
+                    'edit' { $state.Draft = $false }
+                    default { throw "Unexpected release retry command: $command" }
+                }
+            }
+            $rejected = $false
+            try { Publish-ReleaseAssets -Tag 'v1.2.3' -Artifacts $artifacts } catch { $rejected = $true }
+            Assert-True ($rejected -and -not $state.Pending -and $state.Draft) "Interrupted $operation did not stop before publication"
+            Assert-True ($ErrorActionPreference -eq 'Stop') 'Release lookup changed the caller error policy'
+            Publish-ReleaseAssets -Tag 'v1.2.3' -Artifacts $artifacts
+            Assert-True ($state.Exists -and -not $state.Draft -and $state.Uploaded -gt 0) "Retry after interrupted $operation did not complete publication"
+            $uploads = $state.Uploaded
+            $rejected = $false
+            try { Publish-ReleaseAssets -Tag 'v1.2.3' -Artifacts $artifacts } catch { $rejected = $true }
+            Assert-True ($rejected -and $state.Uploaded -eq $uploads) 'Completed release was modified by a retry'
+        }
+    }
+    & {
+        . (Get-ScriptFunctions '.github/scripts/release-assets.ps1')
+        $artifacts = @((Join-Path $testDir 'native-app.zip'))
+        [System.IO.File]::WriteAllText($artifacts[0], 'test artifact')
+        $calls = New-Object 'System.Collections.Generic.List[string]'
+        function gh {
+            $command = if ($args[0] -eq 'api') { 'api' } else { $args[1] }
+            $calls.Add($command)
+            if ($command -eq 'view') {
+                # Exercise real native stderr, including Windows PowerShell 5.1 behavior.
+                & $env:COMSPEC /d /c 'echo release not found 1>&2 & exit /b 1'
+                return
+            }
+            $global:LASTEXITCODE = 0
+            if ($command -eq 'api') { return 'v1.2.2' }
+        }
+        Publish-ReleaseAssets -Tag 'v1.2.3' -Artifacts $artifacts
+        Assert-True (($calls -join ',') -eq 'view,create,upload,api,edit') 'Native missing-release stderr aborted first-time publication'
+        Assert-True ($ErrorActionPreference -eq 'Stop') 'Native release lookup changed the caller error policy'
     }
     Write-Output 'Installer and release safety checks passed.'
 }

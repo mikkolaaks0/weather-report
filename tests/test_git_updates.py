@@ -11,6 +11,28 @@ import main
 
 @unittest.skipUnless(shutil.which("git"), "Git is required")
 class GitUpdateIntegrationTests(unittest.TestCase):
+    @staticmethod
+    def git(directory: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(directory), "-c", "user.name=Test",
+             "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
+             "-c", f"core.hooksPath={directory / 'no-hooks'}", *map(str, args)],
+            capture_output=True, text=True, check=True, timeout=30,
+            **main._hidden_subprocess_kwargs(),
+        ).stdout.strip()
+
+    def remote_checkout(self, root: Path) -> tuple[Path, Path, Path]:
+        remote, author, checkout = (root / name for name in ("origin.git", "author", "app"))
+        self.git(root, "init", "--bare", "--initial-branch=main", remote)
+        self.git(root, "init", "-b", "main", author)
+        (author / "main.py").write_text("VERSION = 1\n", encoding="utf-8")
+        self.git(author, "add", "main.py")
+        self.git(author, "commit", "-m", "Initial version")
+        self.git(author, "remote", "add", "origin", remote)
+        self.git(author, "push", "origin", "main")
+        self.git(root, "clone", "-b", "main", remote, checkout)
+        return remote, author, checkout
+
     def init_repository(self, path: Path) -> None:
         subprocess.run(
             ["git", "init", "-b", "main", str(path)],
@@ -83,6 +105,44 @@ class GitUpdateIntegrationTests(unittest.TestCase):
                     self.assertEqual(main._run_git_command(["check-ignore", "--quiet", name]).returncode, 0)
                 self.assertEqual(main._run_git_command(["check-ignore", "--quiet", "notes.txt"]).returncode, 1)
 
+    def test_update_check_refreshes_main_with_a_custom_fetch_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _remote, author, checkout = self.remote_checkout(root)
+            self.git(checkout, "config", "remote.origin.fetch", "+refs/heads/feature:refs/remotes/origin/feature")
+            original = self.git(checkout, "rev-parse", "HEAD")
+            (author / "main.py").write_text("VERSION = 2\n", encoding="utf-8")
+            self.git(author, "commit", "-am", "New version")
+            self.git(author, "push", "origin", "main")
+            expected = self.git(author, "rev-parse", "HEAD")
+            with patch.object(main, "PROJECT_DIR", checkout), patch.object(main, "IS_FROZEN", False):
+                with patch.object(main, "RUNTIME_FILE_SIGNATURE_AT_START", main._runtime_file_signature()):
+                    status = main.check_github_update_status()
+            self.assertEqual(status["state"], "available")
+            self.assertEqual(status["remote"], expected)
+            self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), original)
+
+    def test_update_check_detects_remote_rewrites_without_changing_local_code(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote, author, checkout = self.remote_checkout(root)
+            self.git(checkout, "config", "remote.origin.fetch", "+refs/heads/feature:refs/remotes/origin/feature")
+            original = self.git(checkout, "rev-parse", "HEAD")
+            self.git(author, "switch", "--orphan", "rewritten")
+            (author / "main.py").write_text("VERSION = 'rewritten'\n", encoding="utf-8")
+            self.git(author, "add", "main.py")
+            self.git(author, "commit", "-m", "Unrelated history")
+            self.git(author, "push", "origin", "rewritten")
+            rewritten = self.git(author, "rev-parse", "HEAD")
+            self.git(remote, "update-ref", "refs/heads/main", rewritten)
+            with patch.object(main, "PROJECT_DIR", checkout), patch.object(main, "IS_FROZEN", False):
+                with patch.object(main, "RUNTIME_FILE_SIGNATURE_AT_START", main._runtime_file_signature()):
+                    self.assertEqual(main.check_github_update_status()["state"], "diverged")
+                    with self.assertRaises(RuntimeError):
+                        main.apply_github_update()
+            self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), original)
+            self.assertEqual((checkout / "main.py").read_text(encoding="utf-8"), "VERSION = 1\n")
+
     def test_local_remote_update_restart_and_conflict_safety(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
@@ -90,14 +150,7 @@ class GitUpdateIntegrationTests(unittest.TestCase):
             author = root / "author"
             checkout = root / "app"
 
-            def git(directory, *args):
-                return subprocess.run(
-                    ["git", "-C", str(directory), "-c", "user.name=Test",
-                     "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
-                     "-c", f"core.hooksPath={root / 'no-hooks'}", *args],
-                    capture_output=True, text=True, check=True, timeout=30,
-                    **main._hidden_subprocess_kwargs(),
-                ).stdout.strip()
+            git = self.git
 
             git(root, "init", "--bare", str(remote))
             git(root, "init", "-b", "main", str(author))

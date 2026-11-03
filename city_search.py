@@ -31,9 +31,10 @@ class CitySearch(tk.Frame):
     def __init__(
         self, parent, entry, variable, search_button, *, search: Callable,
         submit: Callable, dispatch: Callable, start_worker: Callable,
-        font: tuple, background: str, max_query_length: int,
+        font: tuple, background: str, max_query_length: int, scale: float = 1.0,
     ) -> None:
-        super().__init__(parent, bg=background, bd=1, relief="solid")
+        self.scale = max(1.0, scale)
+        super().__init__(parent, bg=background, bd=self._px(1), relief="solid")
         self.entry = entry
         self.variable = variable
         self.search_button = search_button
@@ -63,7 +64,8 @@ class CitySearch(tk.Frame):
             highlightthickness=0, bd=0, height=self.LIMIT,
         )
         self.message = tk.Label(
-            self, font=font, bg=background, fg="#B6D0DE", anchor="w", padx=8, pady=6,
+            self, font=font, bg=background, fg="#B6D0DE", anchor="w",
+            padx=self._px(8), pady=self._px(6),
         )
         self.row_font = tkfont.Font(self, font=font)
         self._fitted_labels_key = None
@@ -80,6 +82,9 @@ class CitySearch(tk.Frame):
         self.popup = parent.winfo_toplevel()
         self.click_binding = self.popup.bind("<Button-1>", self._outside_click, add="+")
         self.focus_binding = self.popup.bind("<FocusOut>", self._focus_out, add="+")
+
+    def _px(self, value: int) -> int:
+        return round(value * self.scale)
 
     def _text(self) -> str:
         return " ".join(self.variable.get().split())
@@ -188,7 +193,7 @@ class CitySearch(tk.Frame):
         elif self.rows:
             self.message.pack_forget()
             self.listbox.configure(height=len(self.rows))
-            self.listbox.pack(fill="both", expand=True, padx=4, pady=4)
+            self.listbox.pack(fill="both", expand=True, padx=self._px(4), pady=self._px(4))
             self.reposition()
             self._select(0)
         else:
@@ -246,17 +251,18 @@ class CitySearch(tk.Frame):
         if self.closed or not (self.rows or self.message.winfo_manager()):
             return
         parent = self.master
-        width = max(1, min(380, parent.winfo_width() - 20))
-        right = self.entry.winfo_rootx() - parent.winfo_rootx() + self.entry.winfo_width() + 5
-        x = max(10, min(right - width, parent.winfo_width() - width - 10))
-        y = self.entry.winfo_rooty() - parent.winfo_rooty() + self.entry.winfo_height() + 3
+        px = self._px
+        width = max(1, min(px(380), parent.winfo_width() - px(20)))
+        right = self.entry.winfo_rootx() - parent.winfo_rootx() + self.entry.winfo_width() + px(5)
+        x = max(px(10), min(right - width, parent.winfo_width() - width - px(10)))
+        y = self.entry.winfo_rooty() - parent.winfo_rooty() + self.entry.winfo_height() + px(3)
         self.place(x=x, y=y, width=width)
         self.lift()
         full_labels = tuple(self._label(place) for place in self.rows)
         label_key = (width, full_labels, self.row_font.actual(), self.tk.call("tk", "scaling"))
         if label_key != self._fitted_labels_key:
             self._fitted_labels = tuple(
-                fit_text(label, width - 18, self.row_font.measure) for label in full_labels
+                fit_text(label, width - px(18), self.row_font.measure) for label in full_labels
             )
             self._fitted_labels_key = label_key
         labels = self._fitted_labels
