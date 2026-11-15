@@ -135,6 +135,48 @@ class PopupScalingTests(unittest.TestCase):
                 control.confirm()
                 control.submit.assert_called_once_with("Helsingborg", places[1])
 
+    def test_long_temperatures_fit_beside_metrics_and_normal_readings_keep_their_size(self):
+        for scale in (1.0, 1.5, 2.0):
+            with self.subTest(scale=scale), self.scaled_widget(scale) as widget:
+                self.populated_popup(widget)
+                canvas = widget.popup_bg_canvas
+                weather = {
+                    "current": {
+                        "temperature_2m": -100, "weather_code": 3,
+                        "relative_humidity_2m": 100, "wind_speed_10m": 32.3,
+                        "wind_direction_10m": 22.5,
+                    },
+                    "current_units": {"temperature_2m": "\N{DEGREE SIGN}F"},
+                    "daily": {
+                        "time": ["2026-11-15"], "temperature_2m_min": [-120],
+                        "temperature_2m_max": [-80], "precipitation_sum": [30],
+                        "precipitation_probability_max": [100],
+                        "sunrise": ["2026-11-15T08:00"], "sunset": ["2026-11-15T16:00"],
+                    },
+                }
+                widget._apply_weather({"name": "Yakutsk"}, weather, "Yakutsk")
+                self.assertLess(widget.hero_temp_font.actual("size"), 54)
+                temperature = canvas.bbox(widget.hero_temp_label)
+                for item in (
+                    widget.today_sun_icon_label, widget.today_rain_mm_icon_label,
+                    widget.today_wind_icon_label,
+                ):
+                    self.assertLess(temperature[2], canvas.bbox(item)[0])
+                self.assertEqual(canvas.itemcget(widget.hero_temp_label, "text"), "-100\N{DEGREE SIGN}F")
+
+                # A later normal reading restores the existing design, and
+                # repeated layout keeps using the same named font.
+                weather["current"]["temperature_2m"] = 18
+                weather["current_units"]["temperature_2m"] = "\N{DEGREE SIGN}C"
+                weather["daily"]["temperature_2m_min"] = [8]
+                weather["daily"]["temperature_2m_max"] = [28]
+                widget._apply_weather({"name": "Espoo"}, weather, "Espoo")
+                self.assertEqual(widget.hero_temp_font.actual("size"), 54)
+                font_name = canvas.itemcget(widget.hero_temp_label, "font")
+                widget._layout_popup_content(widget._px(584), widget._px(329))
+                self.assertEqual(canvas.itemcget(widget.hero_temp_label, "font"), font_name)
+                self.assertEqual(widget.hero_temp_font.actual("size"), 54)
+
     def test_scaled_popup_position_stays_within_the_available_screen(self):
         for scale in (1.0, 1.5, 2.0):
             with self.subTest(scale=scale), self.scaled_widget(scale) as widget:

@@ -482,6 +482,73 @@ try {
     }
     & {
         . (Get-ScriptFunctions 'publish_release.ps1')
+        $origin = Join-Path $testDir 'publish-sync-origin.git'
+        $repository = Join-Path $testDir 'publish sync [literal]'
+        $writer = Join-Path $testDir 'publish-sync-writer'
+        $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('init', '--bare', $origin)
+        $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('init', '-b', 'main', $repository)
+        Push-Location -LiteralPath $repository
+        try {
+            foreach ($entry in @(
+                @('user.name', 'Release Test'), @('user.email', 'release@example.invalid'),
+                @('commit.gpgsign', 'false'), @('core.hooksPath', (Join-Path $testDir 'no-sync-hooks'))
+            )) {
+                $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('config', $entry[0], $entry[1])
+            }
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('commit', '--allow-empty', '-m', 'initial')
+            $firstCommit = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('remote', 'add', 'origin', $origin)
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('push', 'origin', 'main')
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('clone', '--branch', 'main', $origin, $writer)
+            $mapping = '+refs/heads/main:refs/remotes/custom/main'
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('config', 'remote.origin.fetch', $mapping)
+            Assert-True ((Sync-CurrentBranch -ExpectedBranch 'main') -eq 'main') 'Current release branch was rejected'
+
+            # Another clone advances main while origin/main remains stale under
+            # the custom fetch mapping. Publishing must refresh the exact ref.
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @(
+                '-C', $writer, '-c', 'user.name=Release Test', '-c', 'user.email=release@example.invalid',
+                '-c', 'commit.gpgsign=false', '-c', "core.hooksPath=$(Join-Path $testDir 'no-sync-hooks')",
+                'commit', '--allow-empty', '-m', 'remote advance'
+            )
+            $remoteCommit = Get-RequiredCommandOutput -Command 'git' -Arguments @('-C', $writer, 'rev-parse', 'HEAD')
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('-C', $writer, 'push', 'origin', 'main')
+            $message = ''
+            try { Sync-CurrentBranch -ExpectedBranch 'main' } catch { $message = $_.Exception.Message }
+            Assert-True ($message -like '*behind origin/main*') 'Stale custom fetch mapping allowed publishing a behind branch'
+            Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'origin/main')) -eq $remoteCommit) 'Publish check did not refresh origin/main'
+            Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')) -eq $firstCommit) 'Publish check changed local code'
+            Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('config', 'remote.origin.fetch')) -eq $mapping) 'Publish check rewrote the custom fetch configuration'
+
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('merge', '--ff-only', 'origin/main')
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('commit', '--allow-empty', '-m', 'local advance')
+            $localCommit = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')
+            Assert-True ((Sync-CurrentBranch -ExpectedBranch 'main') -eq 'main') 'An ahead release branch could not be pushed'
+            $remoteRef = Get-RequiredCommandOutput -Command 'git' -Arguments @('ls-remote', 'origin', 'refs/heads/main')
+            Assert-True ($remoteRef.StartsWith("$localCommit`t")) 'Release sync did not push the exact ahead commit'
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('update-ref', 'refs/remotes/origin/main', $localCommit)
+
+            # Rewritten remote history must be detected without resetting the
+            # local branch or force-pushing it back over the remote.
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @(
+                '-C', $writer, '-c', 'user.name=Release Test', '-c', 'user.email=release@example.invalid',
+                '-c', 'commit.gpgsign=false', '-c', "core.hooksPath=$(Join-Path $testDir 'no-sync-hooks')",
+                'commit', '--allow-empty', '-m', 'different remote history'
+            )
+            $rewrittenCommit = Get-RequiredCommandOutput -Command 'git' -Arguments @('-C', $writer, 'rev-parse', 'HEAD')
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('-C', $writer, 'push', '--force', 'origin', 'main')
+            $message = ''
+            try { Sync-CurrentBranch -ExpectedBranch 'main' } catch { $message = $_.Exception.Message }
+            Assert-True ($message -like '*behind origin/main*') 'Publish check accepted diverged remote history'
+            Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'origin/main')) -eq $rewrittenCommit) 'Rewritten remote tracking ref was not refreshed'
+            Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')) -eq $localCommit) 'Diverged publish check reset local code'
+            $remoteRef = Get-RequiredCommandOutput -Command 'git' -Arguments @('ls-remote', 'origin', 'refs/heads/main')
+            Assert-True ($remoteRef.StartsWith("$rewrittenCommit`t")) 'Rejected publication overwrote remote history'
+        }
+        finally { Pop-Location }
+    }
+    & {
+        . (Get-ScriptFunctions 'publish_release.ps1')
         $origin = Join-Path $testDir 'release-origin.git'
         $repository = Join-Path $testDir 'release retry [literal]'
         $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('init', '--bare', $origin)

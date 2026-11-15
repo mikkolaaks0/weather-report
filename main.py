@@ -14,7 +14,7 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from http.client import IncompleteRead
 from io import BytesIO
@@ -350,6 +350,36 @@ class WeatherStyle:
     icon_key: str
     label: str
     accent: str
+
+
+_WEATHER_STYLES = {
+    code: style
+    for codes, style in (
+        ((0,), WeatherStyle(icon="☀", icon_key="sun", label="Selkeää", accent=ACCENT_GOLD)),
+        ((1, 2), WeatherStyle(icon="⛅", icon_key="partly-cloudy", label="Puolipilvistä", accent="#E9C37A")),
+        ((3,), WeatherStyle(icon="☁", icon_key="cloudy", label="Pilvistä", accent="#D6DEEA")),
+        ((45, 48), WeatherStyle(icon="🌫", icon_key="fog", label="Sumua", accent="#BCC8D7")),
+        ((51, 53, 55), WeatherStyle(icon="🌦", icon_key="drizzle", label="Tihkua", accent="#8CC7FF")),
+        ((56, 57), WeatherStyle(icon="🌧", icon_key="freezing-rain", label="Jäätävää tihkua", accent="#9EDBFF")),
+        ((61, 63, 65), WeatherStyle(icon="🌧", icon_key="rain", label="Sadetta", accent=ACCENT_BLUE)),
+        ((66, 67), WeatherStyle(icon="🌧", icon_key="freezing-rain", label="Jäätävää sadetta", accent="#9EDBFF")),
+        ((71, 73, 75), WeatherStyle(icon="❄", icon_key="snow", label="Lumisadetta", accent="#BEE9FF")),
+        ((77,), WeatherStyle(icon="❄", icon_key="snow-grains", label="Lumijyväsiä", accent="#BEE9FF")),
+        ((80, 81, 82), WeatherStyle(icon="🌦", icon_key="showers", label="Sadekuuroja", accent=ACCENT_BLUE)),
+        ((85, 86), WeatherStyle(icon="❄", icon_key="snow-showers", label="Lumikuuroja", accent="#BEE9FF")),
+        ((95,), WeatherStyle(icon="⛈", icon_key="thunder", label="Ukkosta", accent=ACCENT_LAVENDER)),
+        ((96, 99), WeatherStyle(icon="⛈", icon_key="thunder-hail", label="Ukkosta ja rakeita", accent=ACCENT_LAVENDER)),
+    )
+    for code in codes
+}
+_NIGHT_WEATHER_STYLES = {
+    0: replace(_WEATHER_STYLES[0], icon="🌙", icon_key="moon"),
+    **{
+        code: replace(_WEATHER_STYLES[code], icon_key=f"{_WEATHER_STYLES[code].icon_key}-night")
+        for code in (1, 2, 80, 81, 82, 85, 86, 95)
+    },
+}
+_UNKNOWN_WEATHER_STYLE = WeatherStyle(icon="•", icon_key="unknown", label="Tuntematon", accent="#D5DAE3")
 
 
 WEATHER_ICON_KEYS = frozenset({
@@ -920,60 +950,9 @@ def _weather_date_changed(weather: dict) -> bool:
 def resolve_weather_style(code: int | float | str | None, is_day: bool = True) -> WeatherStyle:
     numeric_code = _coerce_number(code)
     code = int(numeric_code) if numeric_code is not None and numeric_code.is_integer() else None
-    if code == 0:
-        return WeatherStyle(
-            icon="☀" if is_day else "🌙",
-            icon_key="sun" if is_day else "moon",
-            label="Selkeää",
-            accent=ACCENT_GOLD,
-        )
-    if code in {1, 2}:
-        return WeatherStyle(
-            icon="⛅",
-            icon_key="partly-cloudy" if is_day else "partly-cloudy-night",
-            label="Puolipilvistä",
-            accent="#E9C37A",
-        )
-    if code == 3:
-        return WeatherStyle(icon="☁", icon_key="cloudy", label="Pilvistä", accent="#D6DEEA")
-    if code in {45, 48}:
-        return WeatherStyle(icon="🌫", icon_key="fog", label="Sumua", accent="#BCC8D7")
-    if code in {51, 53, 55}:
-        return WeatherStyle(icon="🌦", icon_key="drizzle", label="Tihkua", accent="#8CC7FF")
-    if code in {56, 57}:
-        return WeatherStyle(icon="🌧", icon_key="freezing-rain", label="Jäätävää tihkua", accent="#9EDBFF")
-    if code in {61, 63, 65}:
-        return WeatherStyle(icon="🌧", icon_key="rain", label="Sadetta", accent=ACCENT_BLUE)
-    if code in {66, 67}:
-        return WeatherStyle(icon="🌧", icon_key="freezing-rain", label="Jäätävää sadetta", accent="#9EDBFF")
-    if code in {71, 73, 75}:
-        return WeatherStyle(icon="❄", icon_key="snow", label="Lumisadetta", accent="#BEE9FF")
-    if code == 77:
-        return WeatherStyle(icon="❄", icon_key="snow-grains", label="Lumijyväsiä", accent="#BEE9FF")
-    if code in {80, 81, 82}:
-        return WeatherStyle(
-            icon="🌦",
-            icon_key="showers" if is_day else "showers-night",
-            label="Sadekuuroja",
-            accent=ACCENT_BLUE,
-        )
-    if code in {85, 86}:
-        return WeatherStyle(
-            icon="❄",
-            icon_key="snow-showers" if is_day else "snow-showers-night",
-            label="Lumikuuroja",
-            accent="#BEE9FF",
-        )
-    if code == 95:
-        return WeatherStyle(
-            icon="⛈",
-            icon_key="thunder" if is_day else "thunder-night",
-            label="Ukkosta",
-            accent=ACCENT_LAVENDER,
-        )
-    if code in {96, 99}:
-        return WeatherStyle(icon="⛈", icon_key="thunder-hail", label="Ukkosta ja rakeita", accent=ACCENT_LAVENDER)
-    return WeatherStyle(icon="•", icon_key="unknown", label="Tuntematon", accent="#D5DAE3")
+    if code in _NIGHT_WEATHER_STYLES and not is_day:
+        return _NIGHT_WEATHER_STYLES[code]
+    return _WEATHER_STYLES.get(code, _UNKNOWN_WEATHER_STYLE)
 
 
 def format_temperature(value: object, unit_symbol: str) -> str:
@@ -2208,12 +2187,13 @@ class WeatherWidget(tk.Tk):
             0,
             anchor="w",
         )
+        self.hero_temp_font = tkfont.Font(self, font=(DISPLAY_FONT, 54, "bold"))
         self.hero_temp_label = self.popup_bg_canvas.create_text(
             0,
             0,
             text="--°C",
             anchor="nw",
-            font=(DISPLAY_FONT, 54, "bold"),
+            font=self.hero_temp_font,
             fill="#FFFFFF",
         )
         self.today_rain_mm_icon_label = self._create_detail_icon(
@@ -2538,6 +2518,39 @@ class WeatherWidget(tk.Tk):
             sun_row_y + sun_event_icon_y_offset,
         )
         self._layout_today_stats(right_text, right_stack_top + px(91))
+        self._fit_temperature_label()
+
+    def _fit_temperature_label(self) -> None:
+        canvas = self.popup_bg_canvas
+        position = canvas.coords(self.hero_temp_label)
+        boundaries = [
+            canvas.bbox(item) for item in (
+                self.today_sun_icon_label,
+                self.today_rain_mm_icon_label,
+                self.today_wind_icon_label,
+            )
+        ]
+        boundaries = [bounds[0] for bounds in boundaries if bounds]
+        if not position or not boundaries:
+            return
+        available = max(1, min(boundaries) - position[0] - self._px(12))
+        font = self.hero_temp_font
+        font.configure(size=54)
+        text = canvas.itemcget(self.hero_temp_label, "text")
+        measured = font.measure(text)
+        if measured <= available:
+            canvas.itemconfigure(self.hero_temp_label, font=font)
+            return
+        # Keep the normal temperature size, shrinking only long readings that
+        # would otherwise run into the sun, rain, or wind metrics.
+        size = max(1, int(54 * available / measured))
+        font.configure(size=size)
+        while size > 1 and font.measure(text) > available:
+            size -= 1
+            font.configure(size=size)
+        # Refresh canvas geometry synchronously, without processing unrelated
+        # idle callbacks while a weather result is being applied.
+        canvas.itemconfigure(self.hero_temp_label, font=font)
 
     def _layout_today_stats(self, right_x: int, top_y: int) -> None:
         px = self._px

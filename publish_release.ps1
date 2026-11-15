@@ -60,7 +60,9 @@ function Sync-CurrentBranch {
         throw "Releases must be published from $ExpectedBranch. Current branch: $branch"
     }
 
-    Invoke-RequiredCommand -Command 'git' -Arguments @('fetch', 'origin', $branch)
+    Invoke-RequiredCommand -Command 'git' -Arguments @(
+        'fetch', 'origin', "+refs/heads/$($branch):refs/remotes/origin/$branch"
+    )
 
     $behind = [int](Get-RequiredCommandOutput -Command 'git' -Arguments @(
         'rev-list', '--count', "HEAD..origin/$branch"

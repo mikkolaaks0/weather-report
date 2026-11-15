@@ -124,6 +124,9 @@ and pixel-based layout use the same scale. The popup remains bounded by the
 available work area. Moving an already-running app between monitors with different
 DPI settings does not currently recompute the layout scale; restart it on the
 target display when needed.
+Long temperature readings fit within the space before the sun/rain/wind metrics
+without losing digits. Normal readings keep their original font size, including
+after a longer reading has been displayed.
 Closing the app during a popup refresh error also cancels the pending popup
 opening, so it cannot access an already destroyed window.
 Popup layout does not run unrelated idle callbacks. Window positioning also
@@ -348,6 +351,10 @@ CLI once and sign in:
 winget install --id GitHub.cli
 gh auth login
 ```
+
+The publisher refreshes the exact `origin/main` tracking reference even with a
+custom Git fetch mapping. It rejects an outdated or diverged local branch
+without resetting local work or overwriting remote history.
 
 Update the version and date in `app_metadata.json`, commit the changes, and
 publish that version (the script derives the tag from the metadata):
