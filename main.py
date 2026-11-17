@@ -477,7 +477,15 @@ def _resize_weather_icon_image(image, width: int, height: int):
     width = max(1, int(width))
     height = max(1, int(height))
     image = _trim_transparent_margins(image)
-    return image.resize((width, height), Image.Resampling.LANCZOS)
+    scale = min(width / image.width, height / image.height)
+    size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    resized = image.resize(size, Image.Resampling.LANCZOS)
+    if size == (width, height):
+        return resized
+
+    canvas = Image.new("RGBA", (width, height))
+    canvas.paste(resized, ((width - resized.width) // 2, (height - resized.height) // 2))
+    return canvas
 
 
 def build_weather_icon_photo(icon_key: str, width: int, height: int):

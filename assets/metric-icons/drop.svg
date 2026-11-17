@@ -1,7 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="drop metric icon">
   <defs>
-    <filter id="shadow" x="-35%" y="-35%" width="170%" height="180%"><feDropShadow dx="5" dy="9" stdDeviation="7" flood-color="#0A2D52" flood-opacity=".36"/></filter>
-    <linearGradient id="blue" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#B9ECFF"/><stop offset=".52" stop-color="#58BDF7"/><stop offset="1" stop-color="#168DE1"/></linearGradient>
+    <linearGradient id="water" x1="24%" y1="0%" x2="72%" y2="100%">
+      <stop stop-color="#B8EAFF"/>
+      <stop offset=".52" stop-color="#69C5F7"/>
+      <stop offset="1" stop-color="#399EE4"/>
+    </linearGradient>
   </defs>
-  <path filter="url(#shadow)" fill="url(#blue)" d="M128 59c29 39 47 70 47 97 0 35-22 61-47 61s-47-26-47-61c0-27 18-58 47-97Z"/><ellipse cx="117" cy="113" rx="13" ry="18" fill="#F6FDFF" opacity=".78"/>
+  <path fill="url(#water)" d="M128 42C114 64 69 116 69 156a59 59 0 0 0 118 0c0-40-45-92-59-114Z"/>
+  <path d="M91 143c2-11 8-23 15-34" fill="none" stroke="#ECFAFF" stroke-width="10" stroke-linecap="round" opacity=".72"/>
 </svg>

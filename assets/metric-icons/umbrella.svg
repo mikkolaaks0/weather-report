@@ -1,7 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="umbrella metric icon">
   <defs>
-    <filter id="shadow" x="-35%" y="-35%" width="170%" height="180%"><feDropShadow dx="5" dy="9" stdDeviation="7" flood-color="#0A2D52" flood-opacity=".36"/></filter>
-    <linearGradient id="blue" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#B9ECFF"/><stop offset=".52" stop-color="#58BDF7"/><stop offset="1" stop-color="#168DE1"/></linearGradient>
+    <linearGradient id="canopy" x1="23%" y1="0%" x2="72%" y2="100%">
+      <stop stop-color="#B9EAFF"/>
+      <stop offset=".55" stop-color="#7BCBF5"/>
+      <stop offset="1" stop-color="#469EDD"/>
+    </linearGradient>
   </defs>
-  <g filter="url(#shadow)"><path fill="url(#blue)" d="M32 126c8-50 48-84 96-84s88 34 96 84c-20-14-39-14-58 0-17-13-34-13-51 0-18-13-36-13-53 0-10-8-20-12-30-12Z"/><path fill="none" stroke="#EAF9FF" stroke-width="6" stroke-linecap="round" d="M128 130v79c0 15-10 25-24 20"/><path fill="none" stroke="#F6FDFF" stroke-width="5" opacity=".6" d="M48 111c23-43 68-61 120-45"/></g>
+  <path d="M128 115v73c0 26-35 27-35 2" fill="none" stroke="#BDEBFF" stroke-width="17" stroke-linecap="round"/>
+  <path fill="url(#canopy)" d="M27 135c4-52 47-91 101-91s97 39 101 91c-23-14-45-14-67 1-22-15-46-15-68 0-22-15-44-15-67-1Z"/>
+  <path fill="#EFFAFF" opacity=".24" d="M39 112c12-37 47-64 83-65-23 11-42 34-52 60-10 0-20 2-31 5Z"/>
 </svg>

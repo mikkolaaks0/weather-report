@@ -10,6 +10,35 @@ from urllib.error import HTTPError
 import main
 
 
+@unittest.skipIf(main.Image is None, "Pillow is not available")
+class IconRenderingTests(unittest.TestCase):
+    def test_icon_artwork_fits_inside_the_exported_png(self):
+        for directory in (main.WEATHER_ICONS_DIR, main.METRIC_ICONS_DIR):
+            for path in directory.glob("*.png"):
+                with self.subTest(path=path), main.Image.open(path) as icon:
+                    # A cropped moon or cloud can still have transparent corners.
+                    bounds = icon.getchannel("A").point(lambda a: 255 if a > 3 else 0).getbbox()
+                    self.assertIsNotNone(bounds)
+                    left, top, right, bottom = bounds
+                    self.assertGreater(min(left, top, icon.width - right, icon.height - bottom), 0)
+
+    def test_icons_fit_their_slots_without_stretching_or_dimming_translucent_edges(self):
+        color = (255, 255, 255, 128)
+        for slot, shape, expected_bounds in (
+            ((43, 39), (20, 10), (0, 8, 43, 30)),  # Wide forecast cloud
+            ((12, 14), (10, 20), (2, 0, 9, 14)),   # Tall metric drop
+            ((1, 1), (20, 1), (0, 0, 1, 1)),
+        ):
+            with self.subTest(slot=slot, shape=shape):
+                # Asymmetric transparent source margins must not shift the silhouette.
+                source = main.Image.new("RGBA", (37, 41))
+                source.paste(color, (3, 6, 3 + shape[0], 6 + shape[1]))
+                result = main._resize_weather_icon_image(source, *slot)
+                self.assertEqual(result.size, slot)
+                self.assertEqual(result.getchannel("A").getbbox(), expected_bounds)
+                self.assertEqual(result.getpixel((slot[0] // 2, slot[1] // 2)), color)
+
+
 class WeatherFailureFeedbackTests(unittest.TestCase):
     def test_service_http_error_is_reported_as_a_failed_service_request(self):
         widget = object.__new__(main.WeatherWidget)

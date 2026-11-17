@@ -1,12 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="wind metric icon">
   <defs>
-    <filter id="glow" x="-35%" y="-35%" width="170%" height="180%"><feDropShadow dx="0" dy="8" stdDeviation="11" flood-color="#65D6FF" flood-opacity=".42"/><feDropShadow dx="3" dy="7" stdDeviation="5" flood-color="#0A2D52" flood-opacity=".30"/></filter>
-    <linearGradient id="wind" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#B9F0FF" stop-opacity=".95"/><stop offset=".55" stop-color="#84DFFF" stop-opacity=".92"/><stop offset="1" stop-color="#52BFF3" stop-opacity=".88"/></linearGradient>
+    <linearGradient id="air" gradientUnits="userSpaceOnUse" x1="58" y1="63" x2="184" y2="212">
+      <stop stop-color="#B4EBFF"/>
+      <stop offset=".56" stop-color="#8BDCF8"/>
+      <stop offset="1" stop-color="#69C5EF"/>
+    </linearGradient>
   </defs>
-  <g filter="url(#glow)" fill="none" stroke="url(#wind)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" opacity=".94">
-    <path d="M44 103 C96 106 148 105 181 88 C218 69 211 38 179 42 C154 45 153 86 168 85"/>
-    <path d="M13 130 C70 136 135 135 196 116 C237 100 256 129 246 166 C234 205 188 191 193 154"/>
-    <path d="M44 166 C98 177 145 163 178 166 C219 170 217 220 184 227 C153 234 137 204 148 190"/>
+  <g fill="none" stroke="url(#air)" stroke-width="17" stroke-linecap="round">
+    <path d="M53 96c40 3 77 3 99-6 28-11 29-42 6-45-18-3-29 12-25 25"/>
+    <path d="M21 133c62 3 116 6 165-1 28-4 49-16 48-37-1-18-22-23-32-10"/>
+    <path d="M48 170c32 3 61 2 90 0 30-2 43 11 40 28-4 23-35 24-41 3"/>
   </g>
-  <g fill="none" stroke="#E7FAFF" stroke-width="3" stroke-linecap="round" opacity=".25"><path d="M50 95 C99 99 147 98 177 83"/><path d="M22 122 C76 128 137 128 190 112"/><path d="M52 158 C100 168 144 158 174 160"/></g>
 </svg>

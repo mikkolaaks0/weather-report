@@ -1,11 +1,29 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="drizzle weather icon">
   <defs>
-    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx="0" dy="10" stdDeviation="7" flood-color="#176097" flood-opacity=".34"/></filter>
-    <linearGradient id="sun" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#FFE978"/><stop offset="1" stop-color="#FF9E00"/></linearGradient>
-    <linearGradient id="moon" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#FFE91F"/><stop offset="1" stop-color="#FFB700"/></linearGradient>
-    <linearGradient id="cloud" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#F8FDFF"/><stop offset="1" stop-color="#C9E0ED"/></linearGradient>
-    <linearGradient id="rearCloud" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#BFD9EA"/><stop offset="1" stop-color="#8FB4CC"/></linearGradient>
-    <linearGradient id="drop" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#B6EAFF"/><stop offset=".48" stop-color="#5BBDF8"/><stop offset="1" stop-color="#168DE1"/></linearGradient>
+    <filter id="shadow" filterUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
+      <feDropShadow dx="0" dy="3" stdDeviation="2.6" flood-color="#173949" flood-opacity=".25"/>
+    </filter>
+    <radialGradient id="cloud" cx="33%" cy="17%" r="88%">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset=".42" stop-color="#F1F8FC"/>
+      <stop offset=".78" stop-color="#DCEAF3"/>
+      <stop offset="1" stop-color="#C2D7E5"/>
+    </radialGradient>
+    <radialGradient id="cloudLight" cx="61%" cy="24%" r="62%">
+      <stop stop-color="#FFFFFF" stop-opacity=".75"/>
+      <stop offset=".55" stop-color="#F6FBFF" stop-opacity=".48"/>
+      <stop offset="1" stop-color="#F6FBFF" stop-opacity="0"/>
+    </radialGradient>
   </defs>
-  <path filter="url(#shadow)" fill="url(#cloud)" d="M55 181h130c26 0 45-17 45-40 0-21-17-38-39-38-10-25-34-43-63-43-32 0-58 21-65 50-22 2-39 18-39 38 0 19 14 33 31 33Z"/><g stroke-linecap="round"><path stroke="#1E81CA" stroke-width="6" opacity=".48" d="M86 174l-10 28M122 181l-11 32M158 172l-9 26"/><path stroke="#8EDBFF" stroke-width="3" d="M86 172l-10 28M122 179l-11 32M158 170l-9 26"/></g>
+  <g filter="url(#shadow)">
+    <g>
+      <path d="M59 171C39 171 24 157 24 138c0-19 14-34 33-36 5-26 26-44 53-44 22 0 41 12 51 31 6-4 13-6 21-6 17 0 31 10 37 25 12 5 20 16 20 30 0 19-15 33-36 33Z" fill="url(#cloud)" stroke="#779BB0" stroke-opacity=".42" stroke-width="2"/>
+      <path d="M142 127c1-21 17-43 39-43 17 0 31 10 37 25 10 4 18 14 19 25 0 17-16 30-42 30-29 0-54-12-53-37Z" fill="url(#cloudLight)"/>
+      <path d="M32 153c7 8 16 12 29 12h140c13 0 24-4 32-12-6 12-16 18-31 18H59c-12 0-22-6-27-18Z" fill="#A8C8D9" opacity=".26"/>
+    </g>
+    <g fill="none" stroke-linecap="round">
+      <path d="m83 170-11 26m57-21-13 31m60-38-10 24" stroke="#398BB8" stroke-width="8"/>
+      <path d="m83 170-11 26m57-21-13 31m60-38-10 24" stroke="#9ADFFF" stroke-width="5"/>
+    </g>
+  </g>
 </svg>
