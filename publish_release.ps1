@@ -60,19 +60,20 @@ function Sync-CurrentBranch {
         throw "Releases must be published from $ExpectedBranch. Current branch: $branch"
     }
 
+    $trackingRef = "refs/remotes/origin/$branch"
     Invoke-RequiredCommand -Command 'git' -Arguments @(
-        'fetch', 'origin', "+refs/heads/$($branch):refs/remotes/origin/$branch"
+        'fetch', '--refmap=', '--no-tags', '--no-prune', 'origin', "+refs/heads/$($branch):$trackingRef"
     )
 
     $behind = [int](Get-RequiredCommandOutput -Command 'git' -Arguments @(
-        'rev-list', '--count', "HEAD..origin/$branch"
+        'rev-list', '--count', "HEAD..$trackingRef"
     ))
     if ($behind -gt 0) {
         throw "Local branch is behind origin/$branch. Pull first, then publish."
     }
 
     $ahead = [int](Get-RequiredCommandOutput -Command 'git' -Arguments @(
-        'rev-list', '--count', "origin/$branch..HEAD"
+        'rev-list', '--count', "$trackingRef..HEAD"
     ))
     if ($ahead -gt 0) {
         Invoke-RequiredCommand -Command 'git' -Arguments @('push', 'origin', $branch)
@@ -194,6 +195,7 @@ Invoke-RequiredCommand -Command 'powershell' -Arguments $buildArgs
 $portableZip = Join-Path $root 'release\WeatherReport-portable.zip'
 $installer = Join-Path $root 'release\WeatherReport-Setup.exe'
 $checksums = Join-Path $root 'release\SHA256SUMS.txt'
+$releaseArtifacts = @($portableZip)
 if (-not (Test-Path -LiteralPath $portableZip)) {
     throw "Release artifact was not found: $portableZip"
 }
@@ -201,17 +203,16 @@ if (-not (Test-Path -LiteralPath $checksums)) {
     throw "Release checksum file was not found: $checksums"
 }
 $signatureArguments = @{ PortableZip = $portableZip }
-if (Test-Path -LiteralPath $installer) { $signatureArguments.Installer = $installer }
+if (Test-Path -LiteralPath $installer -PathType Leaf) {
+    $signatureArguments.Installer = $installer
+    $releaseArtifacts += $installer
+}
 Assert-WindowsReleaseArtifacts @signatureArguments
+Assert-ReleaseArtifactChecksums -Artifacts $releaseArtifacts -ChecksumPath $checksums
 
 Assert-ReleaseSourceUnchanged -Commit $releaseCommit -Branch $branch
 Publish-LocalReleaseTag -Tag $Version -Commit $releaseCommit
 
-$releaseArtifacts = @($portableZip, $checksums)
-if (Test-Path -LiteralPath $installer) {
-    $releaseArtifacts += $installer
-}
-
-Publish-ReleaseAssets -Tag $Version -Artifacts $releaseArtifacts -Draft:$Draft -Prerelease:$Prerelease
+Publish-ReleaseAssets -Tag $Version -Artifacts ($releaseArtifacts + $checksums) -Draft:$Draft -Prerelease:$Prerelease
 if ($Draft) { Write-Host "Prepared draft $Version from $branch." }
 else { Write-Host "Published $Version from $branch." }

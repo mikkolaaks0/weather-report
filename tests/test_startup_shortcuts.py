@@ -146,9 +146,9 @@ class StartupOwnershipTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows shortcut integration")
     def test_real_shortcut_reader_preserves_unicode_and_apostrophes(self):
         with tempfile.TemporaryDirectory(prefix="Weather-\u00e4-test-") as directory:
-            path = Path(directory) / "Weather Report's test.lnk"
+            path = Path(directory) / "Weather Report\u2019s 'test'.lnk"
             target = str(main.APP_EXECUTABLE_PATH)
-            arguments = '"S\u00e4\u00e4 test\'s.py"'
+            arguments = '"S\u00e4\u00e4 test\u2019s \'notes\'.py"'
             with patch.object(main, "_resolve_shortcut_target", return_value=(target, arguments, directory, target)):
                 main.create_windows_shortcut(path)
             self.assertEqual(main._read_windows_shortcut(path), {

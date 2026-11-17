@@ -75,6 +75,7 @@ POPUP_FORECAST_DAYS = max(1, FORECAST_DAYS - 1)
 RAIN_PROBABILITY_LOOKAHEAD_HOURS = 6
 UPDATE_REMOTE = "origin"
 UPDATE_BRANCH = "main"
+UPDATE_REMOTE_REF = f"refs/remotes/{UPDATE_REMOTE}/{UPDATE_BRANCH}"
 GIT_REPOSITORY_ENV_VARS = {
     "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX",
     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_IMPLICIT_WORK_TREE",
@@ -715,7 +716,7 @@ def _create_https_context() -> ssl.SSLContext:
 def _get_json(url: str, params: dict) -> dict:
     query = urlencode(params)
     request = Request(
-        f"{url}?{query}",
+        f"{url}?{query}" if query else url,
         headers={
             "Accept": "application/json",
             "User-Agent": f"{APP_SLUG}-desktop",
@@ -723,6 +724,11 @@ def _get_json(url: str, params: dict) -> dict:
     )
     try:
         with _open_weather_request(request, timeout=12, context=_create_https_context()) as response:
+            # HTTPResponse leaves length unset for chunked responses, where a
+            # Content-Length header does not describe the actual framing.
+            declared_length = getattr(response, "length", None)
+            if isinstance(declared_length, int) and declared_length > MAX_JSON_RESPONSE_BYTES:
+                raise WeatherServiceError("Sääpalvelun vastaus oli liian suuri.")
             raw_payload = response.read(MAX_JSON_RESPONSE_BYTES + 1)
             if len(raw_payload) > MAX_JSON_RESPONSE_BYTES:
                 raise WeatherServiceError("Sääpalvelun vastaus oli liian suuri.")
@@ -827,6 +833,10 @@ def get_weather(latitude: float, longitude: float, temperature_unit: str = "cels
             "wind_speed_unit": "ms",
             "timezone": "auto",
             "forecast_days": FORECAST_DAYS,
+            # Include the current hour and the last partially overlapping hour.
+            # For fractional UTC offsets, Open-Meteo can start an hour earlier
+            # when aligning the hourly range to its whole-hour offset.
+            "forecast_hours": RAIN_PROBABILITY_LOOKAHEAD_HOURS + 3,
         },
     )
 
@@ -1013,6 +1023,20 @@ def format_time_short(value: object) -> str:
     return parsed.strftime("%H:%M") if parsed else "-"
 
 
+def _format_sun_events(daily: dict, index: int) -> tuple[str, str]:
+    day = _sequence_item(daily.get("time"), index)
+    sunrise = _sequence_item(daily.get("sunrise"), index)
+    sunset = _sequence_item(daily.get("sunset"), index)
+    # Open-Meteo encodes polar night as two identical local midnights and
+    # polar day as the midnights at the start and end of the forecast day.
+    if sunrise == f"{day}T00:00" and isinstance(sunset, str) and sunset.endswith("T00:00"):
+        rise_time = _parse_open_meteo_time(sunrise)
+        set_time = _parse_open_meteo_time(sunset)
+        if rise_time is not None and set_time is not None and (set_time.date() - rise_time.date()).days in (0, 1):
+            return "-", "-"
+    return format_time_short(sunrise), format_time_short(sunset)
+
+
 def _parse_open_meteo_time(value: object) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -1126,10 +1150,6 @@ def is_startup_enabled() -> bool:
         return any(path.is_file() for path in get_startup_shortcut_paths())
     except OSError:
         return False
-
-
-def _ps_escape(text: str) -> str:
-    return text.replace("'", "''")
 
 
 def _hidden_subprocess_kwargs() -> dict:
@@ -1251,13 +1271,24 @@ def create_windows_shortcut(shortcut_path: Path) -> None:
         os.replace(staged_path, shortcut_path)
 
 
-def _run_shortcut_script(script: str) -> str:
+def _run_shortcut_script(script: str, *, shortcut_data: dict[str, str] | None = None) -> str:
     shell_path = shutil.which("powershell") or shutil.which("pwsh")
     if not shell_path:
         raise OSError("PowerShelliä ei löytynyt pikakuvakkeen käsittelyyn.")
 
     # Let the chosen PowerShell edition discover its own built-in modules.
     environment = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+    if shortcut_data is not None:
+        # Keep paths and arguments out of PowerShell's command parser.
+        environment["WEATHERREPORT_SHORTCUT_DATA"] = json.dumps(shortcut_data)
+        script = (
+            "$ErrorActionPreference = 'Stop'; "
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+            "$data = ConvertFrom-Json -InputObject $env:WEATHERREPORT_SHORTCUT_DATA; "
+            "$shell = New-Object -ComObject WScript.Shell; "
+            "$link = $shell.CreateShortcut($data.Path); "
+            + script
+        )
     try:
         result = subprocess.run(
             [shell_path, "-NoProfile", "-NonInteractive", "-Sta", "-Command", script],
@@ -1281,21 +1312,22 @@ def _write_windows_shortcut(shortcut_path: Path) -> None:
     if IS_FROZEN and not APP_EXECUTABLE_PATH.exists():
         raise FileNotFoundError(f"Käynnistyskohdetta ei löytynyt: {APP_EXECUTABLE_PATH.name}")
 
-    shortcut_target = str(shortcut_path)
     target_path, arguments, working_dir, icon_path = _resolve_shortcut_target()
 
-    script = (
-        "$ErrorActionPreference = 'Stop'; "
-        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-        "$WshShell = New-Object -ComObject WScript.Shell; "
-        f"$Shortcut = $WshShell.CreateShortcut('{_ps_escape(shortcut_target)}'); "
-        f"$Shortcut.TargetPath = '{_ps_escape(target_path)}'; "
-        f"$Shortcut.Arguments = '{_ps_escape(arguments)}'; "
-        f"$Shortcut.WorkingDirectory = '{_ps_escape(working_dir)}'; "
-        f"$Shortcut.IconLocation = '{_ps_escape(icon_path)}'; "
-        "$Shortcut.Save()"
+    _run_shortcut_script(
+        "$link.TargetPath = $data.Target; "
+        "$link.Arguments = $data.Arguments; "
+        "$link.WorkingDirectory = $data.WorkingDirectory; "
+        "$link.IconLocation = $data.IconLocation; "
+        "$link.Save()",
+        shortcut_data={
+            "Path": str(shortcut_path),
+            "Target": target_path,
+            "Arguments": arguments,
+            "WorkingDirectory": working_dir,
+            "IconLocation": icon_path,
+        },
     )
-    _run_shortcut_script(script)
 
     if not shortcut_path.is_file():
         raise OSError("Pikakuvaketiedostoa ei syntynyt.")
@@ -1303,15 +1335,11 @@ def _write_windows_shortcut(shortcut_path: Path) -> None:
 
 def _read_windows_shortcut(shortcut_path: Path) -> dict:
     script = (
-        "$ErrorActionPreference = 'Stop'; "
-        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-        "$shell = New-Object -ComObject WScript.Shell; "
-        f"$link = $shell.CreateShortcut('{_ps_escape(str(shortcut_path))}'); "
         "@{Target=$link.TargetPath; Arguments=$link.Arguments; "
         "WorkingDirectory=$link.WorkingDirectory; IconLocation=$link.IconLocation} | ConvertTo-Json -Compress"
     )
     try:
-        result = json.loads(_run_shortcut_script(script))
+        result = json.loads(_run_shortcut_script(script, shortcut_data={"Path": str(shortcut_path)}))
     except (ValueError, TypeError) as error:
         raise OSError("Pikakuvakkeen kohdetta ei voitu lukea.") from error
     fields = ("Target", "Arguments", "WorkingDirectory", "IconLocation")
@@ -1419,6 +1447,12 @@ def _git_output(args: list[str], timeout: int = 30) -> str:
     return result.stdout.strip()
 
 
+def _fetch_update_branch(timeout: int = 60) -> None:
+    # Limit this fetch to the tracking ref, regardless of a custom refmap.
+    refspec = f"+refs/heads/{UPDATE_BRANCH}:{UPDATE_REMOTE_REF}"
+    _git_output(["fetch", "--refmap=", "--no-tags", "--no-prune", UPDATE_REMOTE, refspec], timeout=timeout)
+
+
 def check_github_update_status() -> dict:
     if IS_FROZEN:
         return {"state": "unsupported", "message": "Automaattinen Git-päivitys toimii lähdekoodiasennuksessa."}
@@ -1461,18 +1495,14 @@ def check_github_update_status() -> dict:
             ),
         }
 
-    remote_ref = f"{UPDATE_REMOTE}/{UPDATE_BRANCH}"
-    # Refresh the exact tracking ref even if the checkout has a custom or
-    # single-branch fetch mapping. Only the remote-tracking ref may be rewritten.
-    refspec = f"+refs/heads/{UPDATE_BRANCH}:refs/remotes/{remote_ref}"
-    _git_output(["fetch", UPDATE_REMOTE, refspec], timeout=60)
+    _fetch_update_branch()
     local_sha = _git_output(["rev-parse", "HEAD"])
-    remote_sha = _git_output(["rev-parse", remote_ref])
+    remote_sha = _git_output(["rev-parse", UPDATE_REMOTE_REF])
     if local_sha == remote_sha:
         return {"state": "current", "message": f"Sovellus on ajan tasalla. Versio: {APP_VERSION_DATE}."}
 
     try:
-        ancestor = _run_git_command(["merge-base", "--is-ancestor", "HEAD", remote_ref])
+        ancestor = _run_git_command(["merge-base", "--is-ancestor", local_sha, remote_sha])
     except subprocess.TimeoutExpired as error:
         raise RuntimeError("Git-versioiden vertailu aikakatkaistiin.") from error
     if ancestor.returncode == 0:
@@ -1487,7 +1517,7 @@ def check_github_update_status() -> dict:
     raise RuntimeError(details or "Git-versioiden vertailu epäonnistui.")
 
 
-def apply_github_update() -> None:
+def _require_clean_update_branch() -> None:
     current_branch = _git_output(["branch", "--show-current"])
     if current_branch != UPDATE_BRANCH:
         branch_label = current_branch or "detached HEAD"
@@ -1499,13 +1529,15 @@ def apply_github_update() -> None:
     if _git_output(["status", "--porcelain", "--untracked-files=normal"]):
         raise RuntimeError("Paikallisia muutoksia on auki, päivitystä ei tehdä automaattisesti.")
 
-    try:
-        result = _run_git_command(["pull", "--ff-only", UPDATE_REMOTE, UPDATE_BRANCH], timeout=120)
-    except subprocess.TimeoutExpired as error:
-        raise RuntimeError("GitHub-päivitys aikakatkaistiin.") from error
-    if result.returncode != 0:
-        details = (result.stderr or result.stdout or "").strip()
-        raise RuntimeError(details or "GitHub-päivitys epäonnistui.")
+
+def apply_github_update() -> None:
+    _require_clean_update_branch()
+    _fetch_update_branch(timeout=120)
+    remote_sha = _git_output(["rev-parse", UPDATE_REMOTE_REF])
+    # A user may have switched branches or started editing during the fetch.
+    _require_clean_update_branch()
+    # Git normally overwrites ignored filenames that become tracked upstream.
+    _git_output(["merge", "--ff-only", "--no-overwrite-ignore", "--no-autostash", remote_sha], timeout=120)
 
 
 def restart_application() -> subprocess.Popen:
@@ -1528,6 +1560,8 @@ def restart_application() -> subprocess.Popen:
 
 
 class WeatherWidget(tk.Tk):
+    _tray_icon_key: str | None = None
+
     def __init__(self) -> None:
         register_app_fonts()
         super().__init__()
@@ -1735,6 +1769,7 @@ class WeatherWidget(tk.Tk):
         try:
             self.tray_icon = pystray.Icon(APP_SLUG, tray_image, APP_NAME, menu)
             self.tray_icon.run_detached()
+            self._tray_icon_key = "cloud"
         except Exception as error:  # noqa: BLE001
             LOGGER.exception("Tray icon startup failed; using fallback window")
             self._stop_tray_icon()
@@ -1750,6 +1785,7 @@ class WeatherWidget(tk.Tk):
         except Exception:  # noqa: BLE001
             pass
         self.tray_icon = None
+        self._tray_icon_key = None
 
     def _toggle_startup_from_tray(self) -> None:
         if self.startup_change_in_progress:
@@ -1820,7 +1856,7 @@ class WeatherWidget(tk.Tk):
         try:
             os.startfile(WINDOWS_TASKBAR_SETTINGS_URI)  # type: ignore[attr-defined] # noqa: S606
         except OSError:
-            self.status_var.set("Tehtäväpalkin asetusten avaaminen epäonnistui.")
+            messagebox.showerror(APP_NAME, "Tehtäväpalkin asetusten avaaminen epäonnistui.")
             return
 
         self.status_var.set("Asetuksissa: Muut ilmaisinalueen kuvakkeet -> Weather Report päälle.")
@@ -1968,10 +2004,13 @@ class WeatherWidget(tk.Tk):
                 title_text = encoded_title[: (TRAY_TOOLTIP_MAX_UTF16_UNITS - 3) * 2].decode(
                     "utf-16-le", errors="ignore"
                 ) + "..."
-            tray_image = build_weather_tray_icon(icon_key)
-            if tray_image is not None:
-                self.tray_icon.icon = tray_image
             self.tray_icon.title = title_text
+            normalized = _normalize_weather_icon_key(icon_key)
+            if normalized != self._tray_icon_key:
+                tray_image = build_weather_tray_icon(normalized)
+                if tray_image is not None:
+                    self.tray_icon.icon = tray_image
+                    self._tray_icon_key = normalized
         except Exception:  # noqa: BLE001
             # The tray is secondary to the forecast and must not abort a refresh.
             self.report_callback_exception(*sys.exc_info())
@@ -2893,6 +2932,8 @@ class WeatherWidget(tk.Tk):
         except CityNotFoundError as error:
             message = str(error)
             city_not_found = True
+        except HTTPError as error:
+            message = f"Pyyntö sääpalveluun epäonnistui (HTTP {error.code})."
         except (URLError, TimeoutError, ConnectionError, IncompleteRead) as error:
             if _is_certificate_error(error):
                 message = (
@@ -3102,8 +3143,6 @@ class WeatherWidget(tk.Tk):
         t_max = _as_list(daily.get("temperature_2m_max"))
         daily_rain_prob = _as_list(daily.get("precipitation_probability_max"))
         rain_sum = _as_list(daily.get("precipitation_sum"))
-        sunrise_list = _as_list(daily.get("sunrise"))
-        sunset_list = _as_list(daily.get("sunset"))
 
         rain_mm_unit = _clean_text(daily_units.get("precipitation_sum")) or "mm"
         today_high = format_temperature(_sequence_item(t_max, today_index), self.unit_symbol)
@@ -3117,8 +3156,7 @@ class WeatherWidget(tk.Tk):
         today_rain_mm = format_metric(_sequence_item(rain_sum, today_index), f" {rain_mm_unit}", decimals=1, minimum=0)
         wind_speed_ms = format_metric(current.get("wind_speed_10m"), " m/s", decimals=1, minimum=0)
         wind_direction = format_wind_direction(current.get("wind_direction_10m"))
-        today_sunrise = format_time_short(_sequence_item(sunrise_list, today_index))
-        today_sunset = format_time_short(_sequence_item(sunset_list, today_index))
+        today_sunrise, today_sunset = _format_sun_events(daily, today_index)
 
         if wind_speed_ms == "-":
             wind_text = "-"

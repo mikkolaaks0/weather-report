@@ -32,6 +32,20 @@ function Assert-True {
     if (-not $Condition) { throw $Message }
 }
 
+function Get-TestUploadedAssets {
+    param([string[]]$Artifacts)
+
+    foreach ($artifact in $Artifacts) {
+        $file = Get-Item -LiteralPath $artifact
+        [pscustomobject]@{
+            name = $file.Name
+            size = $file.Length
+            state = 'uploaded'
+            digest = 'sha256:' + (Get-FileHash -Algorithm SHA256 -LiteralPath $artifact).Hash.ToLowerInvariant()
+        }
+    }
+}
+
 $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\')
 $testDir = Join-Path $tempRoot "WeatherReportTests-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $testDir | Out-Null
@@ -214,7 +228,8 @@ try {
             $caseDir = Join-Path $testDir "rollback-$hadExistingInstall"
             $InstallDir = [System.IO.Path]::GetFullPath((Join-Path $caseDir 'WeatherReport'))
             $backupDir = "$InstallDir.backup-test"
-            foreach ($target in @($InstallDir, $backupDir)) {
+            $stagedAppDir = Join-Path $caseDir 'extracted'
+            foreach ($target in @($InstallDir, $backupDir, $stagedAppDir)) {
                 Assert-True ($target.StartsWith("$testDir\", [System.StringComparison]::OrdinalIgnoreCase)) 'Unsafe rollback test path'
             }
             Assert-SafeInstallDirectory $InstallDir
@@ -234,6 +249,7 @@ try {
             Remove-Item -LiteralPath $removed
             [System.IO.File]::WriteAllText($created, 'new shortcut')
             $newInstallActivated = $true
+            $backupCreated = $hadExistingInstall
             $caught = $false
             try {
                 try { throw 'simulated launch failure' }
@@ -250,6 +266,94 @@ try {
             }
             else {
                 Assert-True (-not (Test-Path -LiteralPath $InstallDir)) 'Failed first install left its directory behind'
+            }
+        }
+
+        # A directory appearing after the old installation was moved must
+        # remain untouched. Its presence also leaves the backup recoverable.
+        $InstallDir = Join-Path $testDir 'interrupted-install\WeatherReport'
+        $backupDir = "$InstallDir.backup-test"
+        $null = [System.IO.Directory]::CreateDirectory($InstallDir)
+        $null = [System.IO.Directory]::CreateDirectory($backupDir)
+        $newInstallActivated = $false
+        $backupCreated = $true
+        $marker = Join-Path $InstallDir 'foreign.txt'
+        [System.IO.File]::WriteAllText($marker, 'unrelated directory')
+        [System.IO.File]::WriteAllText((Join-Path $backupDir 'old.txt'), 'previous application')
+        $caught = $false
+        try {
+            try { throw 'destination was occupied' }
+            catch { & $rollback 3>$null }
+        }
+        catch { $caught = $_.Exception.Message -eq 'destination was occupied' }
+        Assert-True $caught 'Failed activation lost its original error'
+        Assert-True ([System.IO.File]::ReadAllText($marker) -eq 'unrelated directory') 'Rollback changed an unowned install destination'
+        Assert-True (Test-Path -LiteralPath (Join-Path $backupDir 'old.txt')) 'Rollback lost the previous install backup'
+
+        # Run the actual transaction against an old-format package in temporary
+        # directories, with network access and process launch simulated.
+        $legacyZip = Join-Path $testDir 'legacy-portable.zip'
+        Compress-Archive -LiteralPath @(Get-ChildItem -LiteralPath $package | Select-Object -ExpandProperty FullName) -DestinationPath $legacyZip
+        $installTransaction = [scriptblock]::Create($transaction.Extent.Text)
+        foreach ($mode in @('success', 'launch failure', 'occupied destination')) {
+            & {
+                $InstallDir = Join-Path $testDir "$(($mode -split ' ')[0]) [x]\WeatherReport"
+                $installParent = Split-Path -Parent $InstallDir
+                $downloadDir = Join-Path $tempRoot "WeatherReportInstall-$([guid]::NewGuid().ToString('N'))"
+                $downloadDir = Normalize-PathForSafety $downloadDir
+                $null = [System.IO.Directory]::CreateDirectory($downloadDir)
+                $NoStartMenuShortcut = $NoDesktopShortcut = $true
+                $Startup = $startupWasEnabled = $NoLaunch = $false
+                $newInstallActivated = $backupCreated = $false
+                $extractDir = $null
+                $exeName = 'WeatherReport.exe'
+                $appName = 'Weather Report'
+                if ($mode -eq 'launch failure') {
+                    $null = [System.IO.Directory]::CreateDirectory($InstallDir)
+                    [System.IO.File]::WriteAllText((Join-Path $InstallDir $exeName), 'previous version')
+                }
+                function Get-LatestRelease {
+                    @{ tag_name = 'v0.1.1'; assets = @(@{ name = 'WeatherReport-portable.zip'; browser_download_url = 'fixture' }) }
+                }
+                function Invoke-Download {
+                    param($Uri, $OutFile)
+                    [System.IO.File]::Copy($legacyZip, $OutFile)
+                }
+                function Stop-InstalledApplication {
+                    param($ExecutablePath)
+                    $stage = @(Get-ChildItem -LiteralPath (Split-Path -Parent $InstallDir) -Directory -Filter '.wr-*')
+                    Assert-True ($stage.Count -eq 1) 'Package was not staged beside the installation'
+                    Assert-True (Test-Path -LiteralPath (Join-Path $stage[0].FullName $exeName)) 'Staging did not complete before stopping the application'
+                    if ($mode -eq 'occupied destination') {
+                        $null = [System.IO.Directory]::CreateDirectory($InstallDir)
+                        [System.IO.File]::WriteAllText((Join-Path $InstallDir 'foreign.txt'), 'created during update')
+                    }
+                }
+                function Start-InstalledApplication {
+                    param($ExecutablePath, $WorkingDirectory)
+                    Assert-True ($mode -ne 'occupied destination') 'Installer launched after failed activation'
+                    Assert-True ([System.IO.File]::ReadAllText($ExecutablePath) -ceq 'placeholder') 'Installed executable has unexpected contents'
+                    if ($mode -eq 'launch failure') { throw 'test launch failed' }
+                }
+                $message = ''
+                try { & $installTransaction } catch { $message = $_.Exception.Message }
+                Assert-True (-not (Test-Path -LiteralPath $downloadDir)) 'Installer did not clean its temporary download'
+                Assert-True (-not (Get-ChildItem -LiteralPath $installParent -Directory -Filter '.wr-*')) 'Installer did not clean its staging directory'
+                switch ($mode) {
+                    'success' {
+                        Assert-True (-not $message) "Install failed: $message"
+                        Assert-True (Test-Path -LiteralPath (Join-Path $InstallDir $exeName)) 'The package was not installed'
+                    }
+                    'launch failure' {
+                        Assert-True ($message -ceq 'test launch failed') "Launch failure was not preserved: $message"
+                        Assert-True ([System.IO.File]::ReadAllText((Join-Path $InstallDir $exeName)) -ceq 'previous version') 'Previous version was not restored after launch failure'
+                    }
+                    'occupied destination' {
+                        Assert-True ([bool]$message) 'Newly occupied destination was accepted'
+                        Assert-True (Test-Path -LiteralPath (Join-Path $InstallDir 'foreign.txt')) 'Newly occupied destination was removed'
+                        Assert-True (-not (Test-Path -LiteralPath (Join-Path $InstallDir $exeName))) 'Package was moved inside an unowned destination'
+                    }
+                }
             }
         }
     }
@@ -502,6 +606,7 @@ try {
             $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('clone', '--branch', 'main', $origin, $writer)
             $mapping = '+refs/heads/main:refs/remotes/custom/main'
             $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('config', 'remote.origin.fetch', $mapping)
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('branch', 'origin/main')
             Assert-True ((Sync-CurrentBranch -ExpectedBranch 'main') -eq 'main') 'Current release branch was rejected'
 
             # Another clone advances main while origin/main remains stale under
@@ -516,11 +621,13 @@ try {
             $message = ''
             try { Sync-CurrentBranch -ExpectedBranch 'main' } catch { $message = $_.Exception.Message }
             Assert-True ($message -like '*behind origin/main*') 'Stale custom fetch mapping allowed publishing a behind branch'
-            Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'origin/main')) -eq $remoteCommit) 'Publish check did not refresh origin/main'
+            Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'refs/remotes/origin/main')) -eq $remoteCommit) 'Publish check did not refresh origin/main'
             Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')) -eq $firstCommit) 'Publish check changed local code'
+            Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'refs/heads/origin/main')) -eq $firstCommit) 'Publish check changed a same-named local branch'
             Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('config', 'remote.origin.fetch')) -eq $mapping) 'Publish check rewrote the custom fetch configuration'
+            Assert-True (-not (Get-RequiredCommandOutput -Command 'git' -Arguments @('for-each-ref', '--format=%(refname)', 'refs/remotes/custom/main'))) 'Release fetch updated an unrelated tracking ref'
 
-            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('merge', '--ff-only', 'origin/main')
+            $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('merge', '--ff-only', 'refs/remotes/origin/main')
             $null = Get-RequiredCommandOutput -Command 'git' -Arguments @('commit', '--allow-empty', '-m', 'local advance')
             $localCommit = Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')
             Assert-True ((Sync-CurrentBranch -ExpectedBranch 'main') -eq 'main') 'An ahead release branch could not be pushed'
@@ -540,7 +647,7 @@ try {
             $message = ''
             try { Sync-CurrentBranch -ExpectedBranch 'main' } catch { $message = $_.Exception.Message }
             Assert-True ($message -like '*behind origin/main*') 'Publish check accepted diverged remote history'
-            Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'origin/main')) -eq $rewrittenCommit) 'Rewritten remote tracking ref was not refreshed'
+            Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'refs/remotes/origin/main')) -eq $rewrittenCommit) 'Rewritten remote tracking ref was not refreshed'
             Assert-True ((Get-RequiredCommandOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')) -eq $localCommit) 'Diverged publish check reset local code'
             $remoteRef = Get-RequiredCommandOutput -Command 'git' -Arguments @('ls-remote', 'origin', 'refs/heads/main')
             Assert-True ($remoteRef.StartsWith("$rewrittenCommit`t")) 'Rejected publication overwrote remote history'
@@ -635,25 +742,30 @@ try {
         . (Get-ScriptFunctions '.github/scripts/release-assets.ps1')
         $artifacts = @((Join-Path $testDir 'app.zip'), (Join-Path $testDir 'SHA256SUMS.txt'))
         foreach ($artifact in $artifacts) { [System.IO.File]::WriteAllText($artifact, 'test artifact') }
-        $draftJson = '{"tagName":"v1.2.3","isDraft":true}'
+        $draftJson = '{"tagName":"v1.2.3","isDraft":true,"assets":[]}'
         foreach ($case in @(
-            @{ Name = 'new'; Json = ''; Fail = 'view'; Calls = 'view,create,upload,api,edit'; Reject = $false; Latest = 'true' },
-            @{ Name = 'retry draft'; Json = $draftJson; Published = @('v1.2.2', 'v1.1.9'); Calls = 'view,upload,api,edit'; Reject = $false; Latest = 'true' },
-            @{ Name = 'old draft retry'; Json = $draftJson; Published = @('v1.1.0', 'v1.10.0'); Calls = 'view,upload,api,edit'; Reject = $false; Latest = 'false' },
-            @{ Name = 'same version published'; Json = $draftJson; Published = @('1.2.3'); Calls = 'view,upload,api,edit'; Reject = $false; Latest = 'false' },
+            @{ Name = 'new'; Json = ''; Fail = 'view'; Calls = 'view,create,upload,verify,api,edit'; Reject = $false; Latest = 'true' },
+            @{ Name = 'retry draft'; Json = $draftJson; Published = @('v1.2.2', 'v1.1.9'); Calls = 'view,upload,verify,api,edit'; Reject = $false; Latest = 'true' },
+            @{ Name = 'old draft retry'; Json = $draftJson; Published = @('v1.1.0', 'v1.10.0'); Calls = 'view,upload,verify,api,edit'; Reject = $false; Latest = 'false' },
+            @{ Name = 'same version published'; Json = $draftJson; Published = @('1.2.3'); Calls = 'view,upload,verify,api,edit'; Reject = $false; Latest = 'false' },
             @{ Name = 'published'; Json = '{"tagName":"v1.2.3","isDraft":false}'; Calls = 'view'; Reject = $true },
             @{ Name = 'wrong tag'; Json = '{"tagName":"v1.2.4","isDraft":true}'; Calls = 'view'; Reject = $true },
             @{ Name = 'invalid state'; Json = '{"tagName":"v1.2.3","isDraft":"false"}'; Calls = 'view'; Reject = $true },
             @{ Name = 'invalid JSON'; Json = 'invalid'; Calls = 'view'; Reject = $true },
+            @{ Name = 'stale optional installer'; Json = '{"tagName":"v1.2.3","isDraft":true,"assets":[{"name":"WeatherReport-Setup.exe"}]}'; Calls = 'view'; Reject = $true },
             @{ Name = 'create failure'; Json = ''; Fail = @('view', 'create'); Calls = 'view,create'; Reject = $true },
             @{ Name = 'upload failure'; Json = $draftJson; Fail = 'upload'; Calls = 'view,upload'; Reject = $true },
-            @{ Name = 'version lookup failure'; Json = $draftJson; Fail = 'api'; Calls = 'view,upload,api'; Reject = $true },
-            @{ Name = 'unrecognized stable tag'; Json = $draftJson; Published = @('stable'); Calls = 'view,upload,api'; Reject = $true },
-            @{ Name = 'publish failure'; Json = $draftJson; Fail = 'edit'; Calls = 'view,upload,api,edit'; Reject = $true; Latest = 'true' },
-            @{ Name = 'keep draft'; Json = $draftJson; Draft = $true; Calls = 'view,upload,edit'; Reject = $false },
-            @{ Name = 'new prerelease'; Json = ''; Fail = 'view'; Prerelease = $true; Calls = 'view,create,upload,edit'; Reject = $false; Latest = 'false' },
-            @{ Name = 'retry prerelease'; Json = $draftJson; Prerelease = $true; Calls = 'view,upload,edit'; Reject = $false; Latest = 'false' },
-            @{ Name = 'prerelease draft'; Json = $draftJson; Draft = $true; Prerelease = $true; Calls = 'view,upload,edit'; Reject = $false }
+            @{ Name = 'confirmation unavailable'; Json = $draftJson; Fail = 'verify'; Calls = 'view,upload,verify'; Reject = $true },
+            @{ Name = 'missing uploaded asset'; Json = $draftJson; UploadedIssue = 'missing'; Calls = 'view,upload,verify'; Reject = $true },
+            @{ Name = 'wrong uploaded asset'; Json = $draftJson; UploadedIssue = 'digest'; Calls = 'view,upload,verify'; Reject = $true },
+            @{ Name = 'unfinished upload'; Json = $draftJson; UploadedIssue = 'state'; Calls = 'view,upload,verify'; Reject = $true },
+            @{ Name = 'version lookup failure'; Json = $draftJson; Fail = 'api'; Calls = 'view,upload,verify,api'; Reject = $true },
+            @{ Name = 'unrecognized stable tag'; Json = $draftJson; Published = @('stable'); Calls = 'view,upload,verify,api'; Reject = $true },
+            @{ Name = 'publish failure'; Json = $draftJson; Fail = 'edit'; Calls = 'view,upload,verify,api,edit'; Reject = $true; Latest = 'true' },
+            @{ Name = 'keep draft'; Json = $draftJson; Draft = $true; Calls = 'view,upload,verify,edit'; Reject = $false },
+            @{ Name = 'new prerelease'; Json = ''; Fail = 'view'; Prerelease = $true; Calls = 'view,create,upload,verify,edit'; Reject = $false; Latest = 'false' },
+            @{ Name = 'retry prerelease'; Json = $draftJson; Prerelease = $true; Calls = 'view,upload,verify,edit'; Reject = $false; Latest = 'false' },
+            @{ Name = 'prerelease draft'; Json = $draftJson; Draft = $true; Prerelease = $true; Calls = 'view,upload,verify,edit'; Reject = $false }
         )) {
             $calls = New-Object 'System.Collections.Generic.List[string]'
             function gh {
@@ -661,10 +773,20 @@ try {
                 if ($command -ne 'api') {
                     Assert-True ($args[0] -eq 'release' -and $args[2] -ceq 'v1.2.3') 'Unexpected release command'
                 }
+                if ($command -eq 'view' -and $calls.Contains('upload')) { $command = 'verify' }
                 $calls.Add($command)
                 $global:LASTEXITCODE = if (@($case.Fail) -contains $command) { 1 } else { 0 }
                 switch ($command) {
                     'view' { return $case.Json }
+                    'verify' {
+                        $assets = @(Get-TestUploadedAssets $artifacts)
+                        switch ($case.UploadedIssue) {
+                            'missing' { $assets = @($assets[0]) }
+                            'digest' { $assets[0].digest = 'sha256:' + ('0' * 64) }
+                            'state' { $assets[0].state = 'starter' }
+                        }
+                        return (@{ tagName = 'v1.2.3'; isDraft = $true; assets = $assets } | ConvertTo-Json -Compress)
+                    }
                     'create' {
                         Assert-True ($args -contains '--draft' -and $args -contains '--verify-tag') 'Release was not created as a verified draft'
                         Assert-True (($args -contains '--prerelease') -eq [bool]$case.Prerelease) 'New release lost its prerelease flag'
@@ -706,7 +828,8 @@ try {
         foreach ($invalid in @(
             @{ Tag = 'bad'; Artifacts = $artifacts },
             @{ Tag = 'v1.2.3'; Artifacts = @() },
-            @{ Tag = 'v1.2.3'; Artifacts = @((Join-Path $testDir 'missing.zip')) }
+            @{ Tag = 'v1.2.3'; Artifacts = @((Join-Path $testDir 'missing.zip')) },
+            @{ Tag = 'v1.2.3'; Artifacts = @($artifacts[0], $artifacts[0]) }
         )) {
             $rejected = $false
             try { Publish-ReleaseAssets @invalid }
@@ -714,6 +837,15 @@ try {
             Assert-True $rejected 'Publishing accepted invalid tag or missing artifacts'
         }
         Assert-True ($calls.Count -eq 0) 'Invalid input reached GitHub'
+
+        Get-ReleaseChecksumLines -Artifacts @($artifacts[0]) |
+            Set-Content -LiteralPath $artifacts[1] -Encoding ascii
+        Assert-ReleaseArtifactChecksums -Artifacts @($artifacts[0]) -ChecksumPath $artifacts[1]
+        [System.IO.File]::AppendAllText($artifacts[0], 'changed after build')
+        $rejected = $false
+        try { Assert-ReleaseArtifactChecksums -Artifacts @($artifacts[0]) -ChecksumPath $artifacts[1] }
+        catch { $rejected = $_.Exception.Message -like '*does not match*' }
+        Assert-True $rejected 'A stale checksum manifest was accepted'
     }
     & {
         . (Get-ScriptFunctions '.github/scripts/release-assets.ps1')
@@ -724,9 +856,11 @@ try {
             function gh {
                 $command = if ($args[0] -eq 'api') { 'api' } else { $args[1] }
                 $global:LASTEXITCODE = 0
-                if ($command -eq 'view') {
+                if ($command -eq 'view' -and $state.Uploaded) { $command = 'verify' }
+                if ($command -in @('view', 'verify')) {
                     if (-not $state.Exists) { $global:LASTEXITCODE = 1; return }
-                    return (@{ tagName = 'v1.2.3'; isDraft = $state.Draft } | ConvertTo-Json -Compress)
+                    $assets = @(if ($state.Uploaded) { Get-TestUploadedAssets $artifacts })
+                    return (@{ tagName = 'v1.2.3'; isDraft = $state.Draft; assets = $assets } | ConvertTo-Json -Compress)
                 }
                 if ($state.Pending -and $command -eq $operation) {
                     $state.Pending = $false
@@ -766,6 +900,7 @@ try {
         $calls = New-Object 'System.Collections.Generic.List[string]'
         function gh {
             $command = if ($args[0] -eq 'api') { 'api' } else { $args[1] }
+            if ($command -eq 'view' -and $calls.Contains('upload')) { $command = 'verify' }
             $calls.Add($command)
             if ($command -eq 'view') {
                 # Exercise real native stderr, including Windows PowerShell 5.1 behavior.
@@ -773,10 +908,13 @@ try {
                 return
             }
             $global:LASTEXITCODE = 0
+            if ($command -eq 'verify') {
+                return (@{ tagName = 'v1.2.3'; isDraft = $true; assets = @(Get-TestUploadedAssets $artifacts) } | ConvertTo-Json -Compress)
+            }
             if ($command -eq 'api') { return 'v1.2.2' }
         }
         Publish-ReleaseAssets -Tag 'v1.2.3' -Artifacts $artifacts
-        Assert-True (($calls -join ',') -eq 'view,create,upload,api,edit') 'Native missing-release stderr aborted first-time publication'
+        Assert-True (($calls -join ',') -eq 'view,create,upload,verify,api,edit') 'Native missing-release stderr aborted first-time publication'
         Assert-True ($ErrorActionPreference -eq 'Stop') 'Native release lookup changed the caller error policy'
     }
     Write-Output 'Installer and release safety checks passed.'

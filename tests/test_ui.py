@@ -2,8 +2,60 @@ import os
 import unittest
 from contextlib import ExitStack, contextmanager
 from unittest.mock import Mock, patch
+from urllib.error import HTTPError
 
 import main
+
+
+class WeatherFailureFeedbackTests(unittest.TestCase):
+    def test_service_http_error_is_reported_as_a_failed_service_request(self):
+        widget = object.__new__(main.WeatherWidget)
+        widget._call_on_ui_thread = lambda callback: callback()
+        widget._show_error = Mock()
+        place = {"name": "Espoo", "latitude": 60.2, "longitude": 24.65}
+        for status in (302, 429, 503):
+            with self.subTest(status=status):
+                widget._show_error.reset_mock()
+                error = HTTPError(main.FORECAST_URL, status, "upstream reason", None, None)
+                with patch.object(main, "get_weather", side_effect=error), patch.object(main.time, "sleep"):
+                    widget._fetch_worker("Espoo", "celsius", place)
+                widget._show_error.assert_called_once_with(
+                    f"Pyyntö sääpalveluun epäonnistui (HTTP {status}).",
+                    notify_user=False,
+                    retry_previous_location=False,
+                    retry_place=place,
+                )
+
+
+class TrayFeedbackTests(unittest.TestCase):
+    def test_tray_updates_the_title_without_reloading_an_unchanged_icon(self):
+        widget = object.__new__(main.WeatherWidget)
+        widget.tray_icon = Mock()
+        cloudy_image, rain_image = object(), object()
+        with patch.object(main, "build_weather_tray_icon", side_effect=[cloudy_image, None, rain_image]) as build:
+            widget._update_tray_icon("cloudy", "Cloudy 18")
+            widget._update_tray_icon(" CLOUDY ", "Cloudy 19")
+            self.assertIs(widget.tray_icon.icon, cloudy_image)
+            self.assertEqual(widget.tray_icon.title, "Cloudy 19")
+            build.assert_called_once_with("cloudy")
+
+            widget._update_tray_icon("rain", "Rain 17")
+            self.assertIs(widget.tray_icon.icon, cloudy_image)
+            self.assertEqual(widget.tray_icon.title, "Rain 17")
+            widget._update_tray_icon("rain", "Rain 17")
+            self.assertIs(widget.tray_icon.icon, rain_image)
+            self.assertEqual([call.args for call in build.call_args_list], [("cloudy",), ("rain",), ("rain",)])
+
+    @unittest.skipUnless(os.name == "nt", "Windows taskbar settings")
+    def test_taskbar_settings_failure_is_visible_to_the_user(self):
+        widget = object.__new__(main.WeatherWidget)
+        with (
+            patch.object(main.os, "startfile", side_effect=OSError("cannot open Settings")) as startfile,
+            patch.object(main.messagebox, "showerror") as showerror,
+        ):
+            widget._open_taskbar_icon_settings()
+        startfile.assert_called_once_with(main.WINDOWS_TASKBAR_SETTINGS_URI)
+        showerror.assert_called_once()
 
 
 @unittest.skipUnless(os.name == "nt" and main.ImageTk is not None, "Windows Tk/Pillow display scaling")

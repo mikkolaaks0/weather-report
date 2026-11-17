@@ -823,18 +823,9 @@ class SettingsAndShortcutTests(unittest.TestCase):
             target = str(main.APP_EXECUTABLE_PATH)
             with patch.object(main, "_resolve_shortcut_target", return_value=(target, "--test", directory, target)):
                 main.create_windows_shortcut(shortcut)
-            command = (
-                "$ErrorActionPreference = 'Stop'; "
-                "$shell = New-Object -ComObject WScript.Shell; "
-                f"$link = $shell.CreateShortcut('{main._ps_escape(str(shortcut))}'); "
-                "@{Target=$link.TargetPath; Arguments=$link.Arguments; WorkingDirectory=$link.WorkingDirectory} | ConvertTo-Json -Compress"
-            )
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Sta", "-Command", command],
-                capture_output=True, text=True, check=True, timeout=20, **main._hidden_subprocess_kwargs(),
-            )
-            actual = json.loads(result.stdout)
-            self.assertEqual(actual, {"Target": target, "Arguments": "--test", "WorkingDirectory": directory})
+            self.assertEqual(main._read_windows_shortcut(shortcut), {
+                "Target": target, "Arguments": "--test", "WorkingDirectory": directory, "IconLocation": target + ",0",
+            })
             self.assertEqual(list(Path(directory).iterdir()), [shortcut])
 
     def test_source_restart_keeps_the_working_python_environment(self) -> None:
@@ -1115,11 +1106,11 @@ class UpdateSafetyTests(unittest.TestCase):
         self.assertEqual(status["remote"], "remote-sha")
         self.assertEqual(
             git_output.call_args_list[2].args[0],
-            ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"],
+            ["fetch", "--refmap=", "--no-tags", "--no-prune", "origin", "+refs/heads/main:refs/remotes/origin/main"],
         )
         self.assertEqual(
             run_git.call_args_list[1].args[0],
-            ["merge-base", "--is-ancestor", "HEAD", "origin/main"],
+            ["merge-base", "--is-ancestor", "local-sha", "remote-sha"],
         )
 
     def test_current_update_status_includes_running_version(self) -> None:

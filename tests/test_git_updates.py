@@ -143,6 +143,68 @@ class GitUpdateIntegrationTests(unittest.TestCase):
             self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), original)
             self.assertEqual((checkout / "main.py").read_text(encoding="utf-8"), "VERSION = 1\n")
 
+    def test_update_preserves_an_ignored_file_that_the_new_version_tracks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _remote, author, checkout = self.remote_checkout(Path(directory))
+            original = self.git(checkout, "rev-parse", "HEAD")
+            local_file = checkout / "local-settings.txt"
+            (checkout / ".git" / "info" / "exclude").write_text("local-settings.txt\n", encoding="utf-8")
+            local_file.write_text("personal settings\n", encoding="utf-8")
+            (author / local_file.name).write_text("new defaults\n", encoding="utf-8")
+            self.git(author, "add", local_file.name)
+            self.git(author, "commit", "-m", "Track default settings")
+            self.git(author, "push", "origin", "main")
+
+            with patch.object(main, "PROJECT_DIR", checkout):
+                self.assertEqual(self.git(checkout, "status", "--porcelain"), "")
+                with self.assertRaises(RuntimeError):
+                    main.apply_github_update()
+
+            self.assertEqual(local_file.read_text(encoding="utf-8"), "personal settings\n")
+            self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), original)
+
+    def test_update_stops_if_the_user_switches_branches_during_fetch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _remote, author, checkout = self.remote_checkout(Path(directory))
+            original = self.git(checkout, "rev-parse", "HEAD")
+            (author / "main.py").write_text("VERSION = 2\n", encoding="utf-8")
+            self.git(author, "commit", "-am", "New version")
+            self.git(author, "push", "origin", "main")
+            fetch = main._fetch_update_branch
+
+            def fetch_and_switch_branch(timeout):
+                fetch(timeout=timeout)
+                self.git(checkout, "switch", "-c", "feature")
+
+            with (
+                patch.object(main, "PROJECT_DIR", checkout),
+                patch.object(main, "_fetch_update_branch", side_effect=fetch_and_switch_branch),
+                self.assertRaisesRegex(RuntimeError, "feature"),
+            ):
+                main.apply_github_update()
+
+            self.assertEqual(self.git(checkout, "branch", "--show-current"), "feature")
+            self.assertEqual(self.git(checkout, "rev-parse", "HEAD"), original)
+
+    def test_update_check_uses_the_tracking_ref_when_a_local_branch_has_the_same_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _remote, author, checkout = self.remote_checkout(Path(directory))
+            self.git(checkout, "branch", "origin/main")
+            (author / "main.py").write_text("VERSION = 2\n", encoding="utf-8")
+            self.git(author, "commit", "-am", "New version")
+            self.git(author, "push", "origin", "main")
+            expected = self.git(author, "rev-parse", "HEAD")
+
+            with (
+                patch.object(main, "PROJECT_DIR", checkout),
+                patch.object(main, "IS_FROZEN", False),
+                patch.object(main, "RUNTIME_FILE_SIGNATURE_AT_START", None),
+                patch.object(main, "_runtime_file_signature", return_value=None),
+            ):
+                status = main.check_github_update_status()
+            self.assertEqual(status["state"], "available")
+            self.assertEqual(status["remote"], expected)
+
     def test_local_remote_update_restart_and_conflict_safety(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

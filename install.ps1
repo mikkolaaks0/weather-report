@@ -283,9 +283,36 @@ function Test-AssetChecksum {
     }
 }
 
+function Remove-InstallerWorkingDirectory {
+    param([string]$Directory, [string]$Parent, [string]$NamePrefix = 'WeatherReportInstall-')
+
+    if (-not $Directory -or -not (Test-Path -LiteralPath $Directory)) {
+        return
+    }
+    $resolved = Normalize-PathForSafety $Directory
+    $expectedParent = Normalize-PathForSafety $Parent
+    if ((Split-Path -Parent $resolved) -ne $expectedParent -or
+        (Split-Path -Leaf $resolved) -cnotmatch ('^' + [regex]::Escape($NamePrefix) + '[0-9a-f]{32}$')) {
+        Write-Warning "Refusing to clean an unexpected installer directory: $resolved"
+        return
+    }
+    try {
+        $item = Get-Item -LiteralPath $resolved -Force
+        if (-not $item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            throw 'Installer directory no longer refers to a regular directory.'
+        }
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+    }
+    catch {
+        Write-Warning "Installer working directory could not be removed: $resolved"
+    }
+}
+
 Write-Host "Installing $appName..."
 
 New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
+$extractDir = $null
+$backupCreated = $false
 $newInstallActivated = $false
 $shortcutSnapshot = @()
 try {
@@ -299,9 +326,12 @@ Write-Host "Downloading $($asset.name)..."
 Invoke-Download -Uri $asset.browser_download_url -OutFile $zipPath
 Test-AssetChecksum -Release $release -AssetName $asset.name -AssetPath $zipPath
 
-$extractDir = Join-Path $downloadDir 'extracted'
+# A directory can be renamed only within its own volume. Stage beside the
+# installation so custom InstallDir values can use a different drive from TEMP.
+$installParent = Split-Path -Parent $InstallDir
+$extractDir = Join-Path $installParent ".wr-$([guid]::NewGuid().ToString('N'))"
 Write-Host 'Validating package contents...'
-Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
+Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir
 $stagedExePath = Get-ChildItem -LiteralPath $extractDir -Filter $exeName -File -Recurse |
     Select-Object -First 1 -ExpandProperty FullName
 if (-not $stagedExePath) {
@@ -324,29 +354,20 @@ if ($Startup -or $startupWasEnabled) {
 }
 $shortcutSnapshot = @(Get-ShortcutSnapshot -Paths $shortcutPaths)
 
-Stop-InstalledApplication -ExecutablePath (Join-Path $InstallDir $exeName)
-Write-Host "Extracting to $InstallDir..."
-$installParent = Split-Path -Parent $InstallDir
-New-Item -ItemType Directory -Force -Path $installParent | Out-Null
-$backupDir = "$InstallDir.backup-$([guid]::NewGuid().ToString('N'))"
+Assert-SafeInstallDirectory -Path $InstallDir
 $hadExistingInstall = Test-Path -LiteralPath $InstallDir
+Stop-InstalledApplication -ExecutablePath (Join-Path $InstallDir $exeName)
+Write-Host "Installing to $InstallDir..."
+$backupDir = "$InstallDir.backup-$([guid]::NewGuid().ToString('N'))"
 if ($hadExistingInstall) {
-    Move-Item -LiteralPath $InstallDir -Destination $backupDir
+    Assert-SafeInstallDirectory -Path $InstallDir
+    [System.IO.Directory]::Move($InstallDir, $backupDir)
+    $backupCreated = $true
 }
-
-try {
-    Move-Item -LiteralPath $stagedAppDir -Destination $InstallDir
-    $newInstallActivated = $true
-}
-catch {
-    if (Test-Path -LiteralPath $InstallDir) {
-        Remove-Item -LiteralPath $InstallDir -Recurse -Force
-    }
-    if ($hadExistingInstall -and (Test-Path -LiteralPath $backupDir)) {
-        Move-Item -LiteralPath $backupDir -Destination $InstallDir
-    }
-    throw
-}
+# Exact destination: if it has appeared in the meantime, fail without moving
+# the package inside it or removing a directory this installer did not create.
+[System.IO.Directory]::Move($stagedAppDir, $InstallDir)
+$newInstallActivated = $true
 
 $exePath = Join-Path $InstallDir $exeName
 
@@ -390,13 +411,8 @@ if (-not $NoLaunch) {
     Start-InstalledApplication -ExecutablePath $exePath -WorkingDirectory $appDir
 }
 
-if (Test-Path -LiteralPath $backupDir) {
-    try {
-        Remove-Item -LiteralPath $backupDir -Recurse -Force
-    }
-    catch {
-        Write-Warning "The previous installation backup could not be removed: $backupDir"
-    }
+if ($backupCreated) {
+    Remove-InstallerWorkingDirectory -Directory $backupDir -Parent $installParent -NamePrefix "$(Split-Path -Leaf $InstallDir).backup-"
 }
 
 Write-Host "$appName installed successfully."
@@ -404,18 +420,20 @@ Write-Host "Install location: $appDir"
 }
 catch {
     $installError = $_
-    if ($newInstallActivated) {
+    if ($newInstallActivated -or $backupCreated) {
         try {
-            if (Test-Path -LiteralPath $InstallDir) {
-                Remove-Item -LiteralPath $InstallDir -Recurse -Force
+            if ($newInstallActivated -and (Test-Path -LiteralPath $InstallDir)) {
+                [System.IO.Directory]::Move($InstallDir, $stagedAppDir)
             }
-            if ($hadExistingInstall -and (Test-Path -LiteralPath $backupDir)) {
-                Move-Item -LiteralPath $backupDir -Destination $InstallDir
+            if ($backupCreated) {
+                [System.IO.Directory]::Move($backupDir, $InstallDir)
             }
         }
         catch {
             Write-Warning "Installation failed and the previous version could not be fully restored: $($_.Exception.Message)"
         }
+    }
+    if ($newInstallActivated) {
         try {
             Restore-ShortcutSnapshot -Snapshot $shortcutSnapshot
         }
@@ -426,18 +444,6 @@ catch {
     throw $installError
 }
 finally {
-    $normalizedDownloadDir = Normalize-PathForSafety $downloadDir
-    $normalizedTempDir = Normalize-PathForSafety ([System.IO.Path]::GetTempPath())
-    $downloadPrefix = "$normalizedTempDir\WeatherReportInstall-"
-    if (
-        $normalizedDownloadDir.StartsWith($downloadPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
-        (Test-Path -LiteralPath $normalizedDownloadDir)
-    ) {
-        try {
-            Remove-Item -LiteralPath $normalizedDownloadDir -Recurse -Force
-        }
-        catch {
-            Write-Warning "Temporary installer files could not be removed: $normalizedDownloadDir"
-        }
-    }
+    Remove-InstallerWorkingDirectory -Directory $extractDir -Parent $installParent -NamePrefix '.wr-'
+    Remove-InstallerWorkingDirectory -Directory $downloadDir -Parent ([System.IO.Path]::GetTempPath())
 }

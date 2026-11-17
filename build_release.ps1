@@ -98,6 +98,7 @@ function Ensure-Tool {
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $root
 . (Join-Path $root '.github/scripts/windows-signing.ps1')
+. (Join-Path $root '.github/scripts/release-assets.ps1')
 
 $normalizedVersion = Resolve-BuildVersion -MetadataPath (Join-Path $root 'app_metadata.json') -RequestedVersion $Version
 $signingConfiguration = Resolve-WindowsSigningConfiguration -AllowUnsigned:$AllowUnsigned
@@ -174,12 +175,6 @@ if ($signingConfiguration) {
 }
 
 $checksumPath = Join-Path $releaseDir 'SHA256SUMS.txt'
-$releaseArtifacts |
-    Sort-Object { Split-Path -Leaf $_ } |
-    ForEach-Object {
-        $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $_
-        "$($hash.Hash.ToLowerInvariant())  $(Split-Path -Leaf $_)"
-    } |
-    Set-Content -LiteralPath $checksumPath -Encoding ascii
+Get-ReleaseChecksumLines -Artifacts $releaseArtifacts | Set-Content -LiteralPath $checksumPath -Encoding ascii
 
 Write-Host "Checksums ready: $checksumPath"

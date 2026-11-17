@@ -1,6 +1,7 @@
 import io
 import threading
 import unittest
+from datetime import datetime, timedelta
 from email.message import Message
 from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -86,8 +87,9 @@ class HTTPClientTests(unittest.TestCase):
         sleep.assert_called_once_with(1.0)
 
     def test_a_complete_body_without_content_length_is_accepted(self):
-        url, _requests = self.serve([([], b'{"ok": true}')])
+        url, requests = self.serve([([], b'{"ok": true}')])
         self.assertEqual(main._get_json(url, {}), {"ok": True})
+        self.assertEqual(requests, ["/"])
 
     def test_chunked_framing_takes_precedence_over_content_length(self):
         body = b'{"ok": true}'
@@ -95,7 +97,22 @@ class HTTPClientTests(unittest.TestCase):
         url, _requests = self.serve([
             ([("Transfer-Encoding", "chunked"), ("Content-Length", "100")], chunked),
         ])
-        self.assertEqual(main._get_json(url, {}), {"ok": True})
+        with patch.object(main, "MAX_JSON_RESPONSE_BYTES", 32):
+            self.assertEqual(main._get_json(url, {}), {"ok": True})
+
+    def test_over_limit_declared_length_is_rejected_without_waiting_for_body(self):
+        request = Request("https://example.invalid")
+        response = self.https_response(request, 200)
+        response.length = 1024
+        response.read = Mock(side_effect=AssertionError("oversized response body was read"))
+        with (
+            patch.object(main, "MAX_JSON_RESPONSE_BYTES", 32),
+            patch.object(main, "_open_weather_request", return_value=response),
+            self.assertRaisesRegex(main.WeatherServiceError, "liian suuri"),
+        ):
+            main._get_json(request.full_url, {})
+        self.assertTrue(response.closed)
+        response.read.assert_not_called()
 
     def test_an_oversized_body_is_not_retried_as_a_truncated_response(self):
         body = b'{"value": "' + b"x" * 60 + b'"}'
@@ -225,3 +242,32 @@ class HTTPClientTests(unittest.TestCase):
                 ):
                     self.assertEqual(response.status, 200)
                 self.assertEqual(opened, [method, method])
+
+
+class ForecastRequestTests(unittest.TestCase):
+    def test_fractional_timezone_range_keeps_the_last_overlapping_hour(self):
+        # Open-Meteo can align the hourly range to 02:00 while the displayed
+        # current time is already 03:30 in a fractional-offset timezone.
+        # The 09:00–10:00 forecast still overlaps the next six hours.
+        start = datetime(2026, 11, 18, 2)
+
+        def forecast(_url, params):
+            count = params.get("forecast_hours", 24 * params["forecast_days"])
+            times = [start + timedelta(hours=index) for index in range(count)]
+            return {
+                "current": {"time": "2026-11-18T03:30"},
+                "hourly": {
+                    "time": [time.isoformat(timespec="minutes") for time in times],
+                    "precipitation_probability": [90 if time.hour == 10 else 10 for time in times],
+                },
+                "daily": {"time": [
+                    (start.date() + timedelta(days=index)).isoformat()
+                    for index in range(params["forecast_days"])
+                ]},
+            }
+
+        with patch.object(main, "_get_json", side_effect=forecast):
+            weather = main.get_weather(27.72, 85.32)
+        self.assertEqual(main.max_precipitation_probability_next_hours(weather), 90)
+        self.assertEqual(len(weather["daily"]["time"]), 7)
+        self.assertLess(len(weather["hourly"]["time"]), 24)

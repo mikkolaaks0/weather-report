@@ -70,8 +70,11 @@ Downloads have time limits, and the installer stops only the executable inside
 the installation being replaced. An app that exits during that stop is treated
 as already stopped; real termination failures still abort the operation.
 Package extraction and checksum checks support literal Windows paths, including
-directory names containing square brackets. The old startup shortcut is removed only after
-the replacement has been saved successfully.
+directory names containing square brackets. The package is staged beside the
+installation so a custom destination can be on a different drive from the
+download directory. If the destination becomes occupied during replacement,
+the installer preserves it and retains any previous installation backup.
+The old startup shortcut is removed only after its replacement has been saved.
 Core Python/Tk runtime files are checked before stopping the current app. If an
 installation step fails after replacement, recovery restores the previous app
 directory and the original desktop, Start Menu, and startup shortcuts, including
@@ -147,8 +150,10 @@ location's UTC offset from Open-Meteo, not the computer's date.
 Unknown names return refresh to the previous location and its normal interval
 when a previous forecast exists. Impossible optional values (such as humidity
 above 100%, negative wind speed, or wind directions outside 0–360 degrees)
-display as missing without hiding valid weather data. A missing sun-event time
-is never presented as midnight.
+display as missing without hiding valid weather data. Missing sun events during
+polar day or night appear as dashes. Actual events at midnight keep their time.
+The app downloads only the hourly rain data needed for the six-hour lookahead,
+alongside the seven-day forecast.
 Suggestions use the existing Open-Meteo geocoding service, with no location
 permission or additional dependencies. See its [matching rules](https://open-meteo.com/en/docs/geocoding-api).
 
@@ -337,8 +342,10 @@ metadata and belongs to `main`, and builds the package on Windows. It uploads th
 and `SHA256SUMS.txt` to a draft release before publishing it. The newest stable
 version is marked as Latest. A failed build or upload does not replace it.
 Rerunning a failed workflow can reuse the tag's existing draft and replace its
-ZIP and checksum before publishing. Already-published releases are not modified;
-changes to them require a new version tag.
+ZIP and checksum. Publishing verifies the checksum manifest against the build
+and checks that the uploaded draft contains the expected files. An unexpected
+asset, such as a setup executable left by an earlier build, requires a draft
+review before publishing. Changes to a published release require a new tag.
 Release workflow runs are serialized across tags. Before publishing, the workflow
 compares all published stable version tags numerically: retrying an older draft
 does not replace a newer version as Latest. A failed version lookup or an
@@ -436,8 +443,10 @@ as UTF-8, keeping commands scoped to this checkout and supporting international
 filenames on Windows. Untracked files remain a reason to skip automatic updates
 even when Git's status configuration normally hides them.
 The check explicitly refreshes the `origin/main` tracking reference even when
-the checkout uses a custom fetch mapping. Rewritten remote history is detected
-as divergence; local code is never reset to it.
+the checkout uses a custom fetch mapping or has a local branch with the same
+name. Before applying an update, the app checks the branch and working tree
+again after fetching. It stops if the new version would overwrite an ignored
+local file or if the histories have diverged.
 That local restart check works without an internet connection and compares file
 content hashes, so timestamp-only changes do not request a
 restart and same-size edits with identical timestamps are still detected.
