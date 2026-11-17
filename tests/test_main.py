@@ -1113,7 +1113,7 @@ class UpdateSafetyTests(unittest.TestCase):
             ["merge-base", "--is-ancestor", "local-sha", "remote-sha"],
         )
 
-    def test_current_update_status_includes_running_version(self) -> None:
+    def test_current_update_status_includes_git_revision(self) -> None:
         with patch.object(
             main,
             "_git_output",
@@ -1126,7 +1126,7 @@ class UpdateSafetyTests(unittest.TestCase):
             status = main.check_github_update_status()
 
         self.assertEqual(status["state"], "current")
-        self.assertIn(main.APP_VERSION_DATE, status["message"])
+        self.assertIn("Git-versio: local-s.", status["message"])
 
     def test_update_status_detects_code_changed_while_process_was_running(self) -> None:
         with patch.object(

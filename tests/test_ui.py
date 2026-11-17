@@ -744,13 +744,13 @@ class PopupSmokeTests(unittest.TestCase):
             patch.object(main.WeatherWidget, "_init_tray_icon"),
             patch.object(main.WeatherWidget, "_start_background_worker"),
         ):
-            widget = main.WeatherWidget()
+            widget = main.WeatherWidget(source_version="18.11.2026 · abc1234")
             try:
                 widget._layout_popup_content(widget._px(584), widget._px(329))
                 widget._apply_weather({"name": "Espoo", "admin1": "Uusimaa"}, weather, "Espoo")
                 canvas = widget.popup_bg_canvas
                 self.assertEqual(canvas.itemcget(widget.hero_temp_label, "text"), "18\N{DEGREE SIGN}C")
-                self.assertEqual(canvas.itemcget(widget.footer_label, "text"), main.FOOTER_TEXT)
+                self.assertTrue(canvas.itemcget(widget.footer_label, "text").endswith("Lähde: 18.11.2026 · abc1234"))
                 icon_items = [(widget.hero_icon_label, (87, 84))]
                 for index, card in enumerate(widget.forecast_cards):
                     expected_day = main.WEEKDAY_SHORT_FI[main.datetime.fromisoformat(dates[index + 1]).weekday()]

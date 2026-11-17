@@ -257,7 +257,8 @@ Without `-Version`, the build uses its version; an explicit version must match.
 The same version is embedded in the executable's Windows FileVersion and
 ProductVersion fields and passed to Inno Setup. Build the installer through
 `build_release.ps1`, which supplies the required Inno Setup version definition.
-The popup footer continues to display only the release date.
+Packaged apps show the release date in the popup footer. When started from a
+Git checkout, the popup shows the date and short commit ID read at startup.
 
 ## Test
 
@@ -440,8 +441,9 @@ of silently swallowing the manual request. An early weather request likewise rep
 startup weather request; each completed request schedules the next refresh.
 The updater clears inherited repository-local Git context and reads Git output
 as UTF-8, keeping commands scoped to this checkout and supporting international
-filenames on Windows. Untracked files remain a reason to skip automatic updates
-even when Git's status configuration normally hides them.
+filenames on Windows. The version check can compare with GitHub while local
+changes are present. Installing an update requires a clean checkout, including
+untracked files even when Git's status configuration normally hides them.
 The check explicitly refreshes the `origin/main` tracking reference even when
 the checkout uses a custom fetch mapping or has a local branch with the same
 name. Before applying an update, the app checks the branch and working tree

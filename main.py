@@ -88,10 +88,8 @@ IS_FROZEN = bool(getattr(sys, "frozen", False))
 APP_EXECUTABLE_PATH = Path(sys.executable).resolve()
 APP_WORKING_DIR = APP_EXECUTABLE_PATH.parent if IS_FROZEN else PROJECT_DIR
 APP_VERSION_DATE = json.loads((RUNTIME_DIR / "app_metadata.json").read_text(encoding="utf-8"))["date"]
-FOOTER_TEXT = (
-    f"Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot "
-    f"• Versio: {APP_VERSION_DATE}"
-)
+FOOTER_CREDITS = "Säädata: Open-Meteo (CC BY 4.0) · Käyttöehdot"
+FOOTER_TEXT = f"{FOOTER_CREDITS} • Versio: {APP_VERSION_DATE}"
 
 
 def _runtime_file_signature() -> tuple[tuple[str, str], ...] | None:
@@ -1447,6 +1445,19 @@ def _git_output(args: list[str], timeout: int = 30) -> str:
     return result.stdout.strip()
 
 
+def _read_source_version() -> str | None:
+    if IS_FROZEN or not (PROJECT_DIR / ".git").exists():
+        return None
+    try:
+        commit, timestamp = _git_output(
+            ["show", "-s", "--no-show-signature", "--format=%H%x09%cI", "HEAD"], timeout=2,
+        ).split("\t", 1)
+        committed_at = datetime.fromisoformat(timestamp).astimezone()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return f"{committed_at:%d.%m.%Y} · {commit[:7]}"
+
+
 def _fetch_update_branch(timeout: int = 60) -> None:
     # Limit this fetch to the tracking ref, regardless of a custom refmap.
     refspec = f"+refs/heads/{UPDATE_BRANCH}:{UPDATE_REMOTE_REF}"
@@ -1481,12 +1492,10 @@ def check_github_update_status() -> dict:
             ),
         }
 
-    status = _git_output(["status", "--porcelain", "--untracked-files=normal"])
-    if status:
-        return {"state": "dirty", "message": "Paikallisia muutoksia on auki, päivitystä ei tehdä automaattisesti."}
+    dirty = bool(_git_output(["status", "--porcelain", "--untracked-files=normal"]))
 
     # An already-downloaded update can be activated even without a network connection.
-    if _runtime_file_signature() != RUNTIME_FILE_SIGNATURE_AT_START:
+    if not dirty and _runtime_file_signature() != RUNTIME_FILE_SIGNATURE_AT_START:
         return {
             "state": "restart_available",
             "message": (
@@ -1495,11 +1504,27 @@ def check_github_update_status() -> dict:
             ),
         }
 
-    _fetch_update_branch()
-    local_sha = _git_output(["rev-parse", "HEAD"])
-    remote_sha = _git_output(["rev-parse", UPDATE_REMOTE_REF])
+    try:
+        _fetch_update_branch()
+        local_sha = _git_output(["rev-parse", "HEAD"])
+        remote_sha = _git_output(["rev-parse", UPDATE_REMOTE_REF])
+    except (OSError, RuntimeError):
+        if not dirty:
+            raise
+        return {
+            "state": "dirty",
+            "message": "GitHubin versiota ei voitu tarkistaa. Paikalliset muutokset ovat tallessa.",
+        }
     if local_sha == remote_sha:
-        return {"state": "current", "message": f"Sovellus on ajan tasalla. Versio: {APP_VERSION_DATE}."}
+        return {
+            "state": "current",
+            "message": f"Levylle ladattu lähdekoodi on ajan tasalla. Git-versio: {local_sha[:7]}.",
+        }
+    if dirty:
+        return {
+            "state": "dirty",
+            "message": "GitHubin versio eroaa paikallisesta. Päivitystä ei asennettu paikallisten muutosten vuoksi.",
+        }
 
     try:
         ancestor = _run_git_command(["merge-base", "--is-ancestor", local_sha, remote_sha])
@@ -1562,9 +1587,10 @@ def restart_application() -> subprocess.Popen:
 class WeatherWidget(tk.Tk):
     _tray_icon_key: str | None = None
 
-    def __init__(self) -> None:
+    def __init__(self, *, source_version: str | None = None) -> None:
         register_app_fonts()
         super().__init__()
+        self._footer_text = f"{FOOTER_CREDITS} • Lähde: {source_version}" if source_version else FOOTER_TEXT
         # Tk scales point-sized fonts automatically; our canvas and image sizes
         # use logical pixels at 96 DPI and must follow the same display scale.
         self.ui_scale = max(1.0, round(float(self.tk.call("tk", "scaling")) / (96 / 72), 2))
@@ -1916,7 +1942,7 @@ class WeatherWidget(tk.Tk):
         if state == "available":
             should_update = messagebox.askyesno(
                 APP_NAME,
-                f"GitHubissa on uudempi versio kuin {APP_VERSION_DATE}. "
+                "GitHubissa on uudempi versio. "
                 "Päivitetäänkö sovellus nyt ja käynnistetäänkö se uudelleen?",
             )
             if self._is_destroying:
@@ -2320,7 +2346,7 @@ class WeatherWidget(tk.Tk):
         self.footer_label = self.popup_bg_canvas.create_text(
             0,
             0,
-            text=FOOTER_TEXT,
+            text=self._footer_text,
             anchor="se",
             font=(TEXT_FONT, 8),
             fill="#A7B6DB",
@@ -3205,7 +3231,6 @@ class WeatherWidget(tk.Tk):
             self.city_search.set_text(normalized_city, saved_place)
         self._apply_forecast_cards(daily, start_index=today_index + 1)
 
-        self.popup_bg_canvas.itemconfigure(self.footer_label, text=FOOTER_TEXT)
         if city_changed or place_changed or self._settings_save_pending:
             self._persist_settings()
         self.fetch_in_progress = False
@@ -3218,7 +3243,7 @@ class WeatherWidget(tk.Tk):
 if __name__ == "__main__":
     configure_error_logging()
     try:
-        app = WeatherWidget()
+        app = WeatherWidget(source_version=_read_source_version())
         app.mainloop()
     except Exception:
         LOGGER.exception("Application startup or main loop failed")

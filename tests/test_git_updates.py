@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,6 +39,20 @@ class GitUpdateIntegrationTests(unittest.TestCase):
             ["git", "init", "-b", "main", str(path)],
             capture_output=True, check=True, timeout=30, **main._hidden_subprocess_kwargs(),
         )
+
+    def test_source_version_identifies_the_checkout_even_with_local_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            self.init_repository(checkout)
+            timestamp = "2026-11-18T10:30:00+00:00"
+            with patch.dict(os.environ, {"GIT_COMMITTER_DATE": timestamp, "GIT_AUTHOR_DATE": timestamp}):
+                self.git(checkout, "commit", "--allow-empty", "-m", "Source revision")
+            revision = self.git(checkout, "rev-parse", "HEAD")
+            (checkout / "local-notes.txt").write_text("local work", encoding="utf-8")
+            date = datetime.fromisoformat(timestamp).astimezone().strftime("%d.%m.%Y")
+
+            with patch.object(main, "PROJECT_DIR", checkout), patch.object(main, "IS_FROZEN", False):
+                self.assertEqual(main._read_source_version(), f"{date} · {revision[:7]}")
 
     def test_git_operations_ignore_an_inherited_foreign_repository(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -237,15 +252,17 @@ class GitUpdateIntegrationTests(unittest.TestCase):
                 with patch.object(main, "RUNTIME_FILE_SIGNATURE_AT_START", main._runtime_file_signature()):
                     self.assertEqual(main.check_github_update_status()["state"], "current")
                     (checkout / "main.py").write_text("LOCAL_CHANGE = True\n", encoding="utf-8")
-                    self.assertEqual(main.check_github_update_status()["state"], "dirty")
+                    self.assertEqual(main.check_github_update_status()["state"], "current")
                     with self.assertRaises(RuntimeError):
                         main.apply_github_update()
                     self.assertEqual((checkout / "main.py").read_text(encoding="utf-8"), "LOCAL_CHANGE = True\n")
 
-                git(checkout, "commit", "-am", "Local change")
                 (author / "main.py").write_text("VERSION = 3\n", encoding="utf-8")
                 git(author, "commit", "-am", "Conflicting upstream change")
                 git(author, "push", "origin", "main")
+                self.assertEqual(main.check_github_update_status()["state"], "dirty")
+                self.assertEqual((checkout / "main.py").read_text(encoding="utf-8"), "LOCAL_CHANGE = True\n")
+                git(checkout, "commit", "-am", "Local change")
                 with patch.object(main, "RUNTIME_FILE_SIGNATURE_AT_START", main._runtime_file_signature()):
                     self.assertEqual(main.check_github_update_status()["state"], "diverged")
                     before = git(checkout, "rev-parse", "HEAD")
