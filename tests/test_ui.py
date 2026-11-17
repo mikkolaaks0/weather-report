@@ -12,6 +12,35 @@ import main
 
 @unittest.skipIf(main.Image is None, "Pillow is not available")
 class IconRenderingTests(unittest.TestCase):
+    def test_every_tray_silhouette_uses_the_long_axis_at_common_display_scales(self):
+        for key in sorted(main.WEATHER_ICON_KEYS):
+            tray = main.build_weather_tray_icon(key)
+            for pixels in (16, 20, 24, 32):
+                with self.subTest(key=key, pixels=pixels):
+                    icon = tray.resize((pixels, pixels), main.Image.Resampling.LANCZOS)
+                    # Measure the visible glyph, excluding the faint edge of the shadow.
+                    bounds = icon.getchannel("A").point(lambda value: value > 128).getbbox()
+                    self.assertIsNotNone(bounds)
+                    left, top, right, bottom = bounds
+                    self.assertEqual(max(right - left, bottom - top), pixels)
+
+    def test_tray_stretches_only_the_spare_axis_and_keeps_the_face_centered(self):
+        for (width, height), expected in (
+            ((40, 20), (62, 37)), ((20, 40), (37, 62)), ((40, 40), (62, 62)),
+        ):
+            with self.subTest(width=width, height=height):
+                # A faint asymmetric shadow around the face must not shrink or shift it.
+                source = main.Image.new("RGBA", (90, 90), (40, 60, 70, 16))
+                source.paste((240, 245, 250, 255), (5, 7, 5 + width, 7 + height))
+                with patch.object(main, "_load_weather_icon_image", return_value=source):
+                    icon = main.build_weather_tray_icon("cloud")
+                bounds = icon.getchannel("A").point(lambda value: value > 200).getbbox()
+                self.assertIsNotNone(bounds)
+                left, top, right, bottom = bounds
+                self.assertEqual((right - left, bottom - top), expected)
+                self.assertLessEqual(abs(left - (64 - right)), 1)
+                self.assertLessEqual(abs(top - (64 - bottom)), 1)
+
     def test_tray_contour_preserves_the_face_and_transparent_gaps(self):
         face = (239, 246, 250, 255)
         source = main.Image.new("RGBA", (60, 60))

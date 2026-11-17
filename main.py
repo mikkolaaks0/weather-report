@@ -437,11 +437,11 @@ def _weather_icon_path(icon_key: str) -> Path:
     return WEATHER_ICONS_DIR / f"{normalized}.png"
 
 
-def _trim_transparent_margins(image):
+def _trim_transparent_margins(image, *, alpha_threshold: int = 3):
     if image is None or "A" not in image.getbands():
         return image
 
-    alpha = image.getchannel("A").point(lambda value: 255 if value > 3 else 0)
+    alpha = image.getchannel("A").point(lambda value: 255 if value > alpha_threshold else 0)
     bbox = alpha.getbbox()
     if not bbox:
         return image
@@ -499,16 +499,27 @@ def build_weather_icon_photo(icon_key: str, width: int, height: int):
 
 
 def build_weather_tray_icon(icon_key: str):
-    image = _resize_weather_icon_image(_load_weather_icon_image(icon_key), 60, 60)
+    # The faint outer shadow should not determine the size of a tiny tray glyph.
+    image = _trim_transparent_margins(_load_weather_icon_image(icon_key), alpha_threshold=24)
     if image is None:
         return None
 
+    tray_size = 64
+    long_side = tray_size - 2  # One pixel for the contour at either end.
+    short_side = long_side * min(image.size) / max(image.size)
+    # Use some of the free space while keeping slim icons and crescents recognizable.
+    short_side += min(short_side * 0.18, (long_side - short_side) * 0.4)
+    short_side = max(1, round(short_side))
+    size = (long_side, short_side) if image.width >= image.height else (short_side, long_side)
+    image = image.resize(size, Image.Resampling.LANCZOS)
+    origin = ((tray_size - image.width) // 2, (tray_size - image.height) // 2)
+
     # A half-pixel contour at 16 px keeps pale clouds visible on a light taskbar.
-    alpha = Image.new("L", (64, 64))
-    alpha.paste(image.getchannel("A"), (2, 2))
+    alpha = Image.new("L", (tray_size, tray_size))
+    alpha.paste(image.getchannel("A"), origin)
     tray = Image.new("RGBA", alpha.size, (43, 69, 91))
     tray.putalpha(alpha.filter(ImageFilter.MaxFilter(5)).point(lambda value: value // 2))
-    tray.alpha_composite(image, (2, 2))
+    tray.alpha_composite(image, origin)
     return tray
 
 
