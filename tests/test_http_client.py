@@ -1,7 +1,7 @@
 import io
 import threading
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.message import Message
 from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -85,6 +85,23 @@ class HTTPClientTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(len(requests), 2)
         sleep.assert_called_once_with(1.0)
+
+    def test_long_server_retry_delay_skips_the_short_retry_and_closes_the_response(self):
+        for code, header in ((429, "120"), (503, "Wed, 18 Nov 2026 01:02:00 GMT")):
+            with self.subTest(code=code):
+                request = Request("https://example.invalid/forecast")
+                response = self.https_response(request, code, headers=[("Retry-After", header)])
+                with (
+                    patch.object(main, "datetime", wraps=datetime) as clock,
+                    patch.object(HTTPSHandler, "https_open", return_value=response) as open_request,
+                    patch.object(main.time, "sleep") as sleep,
+                    self.assertRaises(HTTPError),
+                ):
+                    clock.now.return_value = datetime(2026, 11, 18, 1, tzinfo=timezone.utc)
+                    main._request_with_retry(lambda: main._get_json(request.full_url, {}))
+                open_request.assert_called_once()
+                sleep.assert_not_called()
+                self.assertTrue(response.closed)
 
     def test_a_complete_body_without_content_length_is_accepted(self):
         url, requests = self.serve([([], b'{"ok": true}')])

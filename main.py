@@ -16,6 +16,7 @@ import tkinter as tk
 import webbrowser
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from http.client import IncompleteRead
 from io import BytesIO
 from logging.handlers import RotatingFileHandler
@@ -61,6 +62,7 @@ OPEN_METEO_TERMS_URL = "https://open-meteo.com/en/terms"
 WINDOWS_TASKBAR_SETTINGS_URI = "ms-settings:taskbar"
 REFRESH_INTERVAL_MS = 30 * 60 * 1000
 WEATHER_RETRY_DELAYS_MS = (60_000, 120_000, 300_000)
+MAX_SERVER_RETRY_DELAY_SECONDS = 24 * 60 * 60
 FRESH_WEATHER_MAX_AGE_MINUTES = 15
 UPDATE_CHECK_DELAY_MS = 10 * 1000
 MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -575,7 +577,16 @@ def format_clock_fi(value: datetime) -> str:
 
 
 def _normalize_city_query(value: object) -> str:
-    return " ".join(value.split()) if isinstance(value, str) else ""
+    if not isinstance(value, str):
+        return ""
+    normalized = " ".join(value.split())
+    try:
+        normalized.encode("utf-8")
+    except UnicodeEncodeError:
+        # JSON can decode a lone surrogate that cannot be sent in a URL or
+        # written back to the settings file as UTF-8.
+        return ""
+    return normalized
 
 
 def _saved_place(value: object) -> dict | None:
@@ -843,24 +854,45 @@ def _is_certificate_error(error: BaseException) -> bool:
     return isinstance(error, URLError) and isinstance(error.reason, ssl.SSLCertVerificationError)
 
 
+def _server_retry_delay(error: HTTPError) -> float:
+    if error.code not in {429, 503} or error.headers is None:
+        return 0.0
+    value = error.headers.get("Retry-After", "").strip()
+    if value.isascii() and value.isdecimal():
+        seconds = float(value)
+    else:
+        try:
+            when = parsedate_to_datetime(value)
+        except (OverflowError, ValueError):
+            return 0.0
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        seconds = (when - datetime.now(timezone.utc)).total_seconds()
+    # Bound the automatic delay and keep it within Tk's millisecond timer range.
+    return min(max(0.0, seconds), MAX_SERVER_RETRY_DELAY_SECONDS)
+
+
 def _request_with_retry(
     operation: Callable[[], dict],
     attempts: int = 2,
     retry_delay_seconds: float = 1.0,
 ) -> dict:
     attempts = max(1, attempts)
+    delay = max(0.0, retry_delay_seconds)
     for attempt in range(attempts):
         try:
             return operation()
         except HTTPError as error:
             error.close()
             retryable = error.code in {408, 425, 429} or error.code >= 500
-            if not retryable or attempt == attempts - 1:
+            # Let the refresh timer handle a longer wait instead of occupying
+            # the worker and blocking queued manual searches.
+            if not retryable or attempt == attempts - 1 or _server_retry_delay(error) > delay:
                 raise
         except (URLError, TimeoutError, ConnectionError, IncompleteRead) as error:
             if _is_certificate_error(error) or attempt == attempts - 1:
                 raise
-        time.sleep(max(0.0, retry_delay_seconds))
+        time.sleep(delay)
 
 
 def _as_dict(value: object) -> dict:
@@ -1445,17 +1477,27 @@ def _git_output(args: list[str], timeout: int = 30) -> str:
     return result.stdout.strip()
 
 
-def _read_source_version() -> str | None:
+@dataclass(frozen=True)
+class SourceVersion:
+    commit: str
+    committed_at: datetime
+
+    def __str__(self) -> str:
+        return f"{self.committed_at:%d.%m.%Y} · {self.commit[:7]}"
+
+
+def _read_source_version() -> SourceVersion | None:
     if IS_FROZEN or not (PROJECT_DIR / ".git").exists():
         return None
     try:
         commit, timestamp = _git_output(
-            ["show", "-s", "--no-show-signature", "--format=%H%x09%cI", "HEAD"], timeout=2,
+            ["show", "-s", "--no-show-signature", "--format=%H%x09%ct", "HEAD"], timeout=2,
         ).split("\t", 1)
-        committed_at = datetime.fromisoformat(timestamp).astimezone()
-    except (OSError, RuntimeError, ValueError):
+        # Git can spell UTC as "Z", which fromisoformat did not accept in 3.10.
+        committed_at = datetime.fromtimestamp(int(timestamp), timezone.utc).astimezone()
+    except (OSError, RuntimeError, ValueError, OverflowError):
         return None
-    return f"{committed_at:%d.%m.%Y} · {commit[:7]}"
+    return SourceVersion(commit, committed_at)
 
 
 def _fetch_update_branch(timeout: int = 60) -> None:
@@ -1464,7 +1506,7 @@ def _fetch_update_branch(timeout: int = 60) -> None:
     _git_output(["fetch", "--refmap=", "--no-tags", "--no-prune", UPDATE_REMOTE, refspec], timeout=timeout)
 
 
-def check_github_update_status() -> dict:
+def check_github_update_status(running_commit: str | None = None) -> dict:
     if IS_FROZEN:
         return {"state": "unsupported", "message": "Automaattinen Git-päivitys toimii lähdekoodiasennuksessa."}
 
@@ -1494,8 +1536,11 @@ def check_github_update_status() -> dict:
 
     dirty = bool(_git_output(["status", "--porcelain", "--untracked-files=normal"]))
 
-    # An already-downloaded update can be activated even without a network connection.
-    if not dirty and _runtime_file_signature() != RUNTIME_FILE_SIGNATURE_AT_START:
+    # A committed update already on disk needs only a restart, even if there
+    # are other local edits. Do not offer a restart for uncommitted edits alone.
+    if _runtime_file_signature() != RUNTIME_FILE_SIGNATURE_AT_START and (
+        not dirty or (running_commit and _git_output(["rev-parse", "HEAD"]) != running_commit)
+    ):
         return {
             "state": "restart_available",
             "message": (
@@ -1587,9 +1632,10 @@ def restart_application() -> subprocess.Popen:
 class WeatherWidget(tk.Tk):
     _tray_icon_key: str | None = None
 
-    def __init__(self, *, source_version: str | None = None) -> None:
+    def __init__(self, *, source_version: SourceVersion | None = None) -> None:
         register_app_fonts()
         super().__init__()
+        self._running_commit = source_version.commit if source_version else None
         self._footer_text = f"{FOOTER_CREDITS} • Lähde: {source_version}" if source_version else FOOTER_TEXT
         # Tk scales point-sized fonts automatically; our canvas and image sizes
         # use logical pixels at 96 DPI and must follow the same display scale.
@@ -1611,6 +1657,7 @@ class WeatherWidget(tk.Tk):
         self.fetch_in_progress = False
         self.weather_failure_count = 0
         self.weather_error_notified = False
+        self._server_retry_not_before = 0.0
         self.pending_city_search: str | None = None
         self.pending_city_place: dict | None = None
         self.update_check_in_progress = False
@@ -1794,24 +1841,58 @@ class WeatherWidget(tk.Tk):
 
         try:
             self.tray_icon = pystray.Icon(APP_SLUG, tray_image, APP_NAME, menu)
-            self.tray_icon.run_detached()
             self._tray_icon_key = "cloud"
+            if os.name == "nt":
+                tray = self.tray_icon
+                self._start_background_worker(lambda: self._run_windows_tray(tray))
+            else:
+                self.tray_icon.run_detached()
         except Exception as error:  # noqa: BLE001
             LOGGER.exception("Tray icon startup failed; using fallback window")
-            self._stop_tray_icon()
-            self.status_var.set(f"Tray-kuvakkeen käynnistys epäonnistui: {error}")
-            self.deiconify()
+            self._show_tray_fallback(str(error))
 
-    def _stop_tray_icon(self) -> None:
-        if self.tray_icon is None:
-            return
+    def _run_windows_tray(self, tray) -> None:
+        # Windows supports Icon.run off the main thread. Running it in our
+        # daemon worker also makes its setup thread a daemon if it never wakes.
+        def report_failure(error: str) -> None:
+            self._call_on_ui_thread(lambda: self._show_tray_fallback(error, tray=tray))
+
+        def setup(icon) -> None:
+            try:
+                if self._is_destroying or self.tray_icon is not icon:
+                    icon.stop()
+                else:
+                    icon.visible = True
+            except Exception as error:  # noqa: BLE001
+                LOGGER.exception("Could not display the tray icon")
+                report_failure(str(error))
 
         try:
-            self.tray_icon.stop()
-        except Exception:  # noqa: BLE001
-            pass
+            tray.run(setup=setup)
+        except Exception as error:  # noqa: BLE001
+            LOGGER.exception("Windows tray loop failed")
+            report_failure(str(error))
+        else:
+            report_failure("Ilmaisinalueen kuvake sulkeutui.")
+
+    def _show_tray_fallback(self, error: str, *, tray=None) -> None:
+        if tray is not None and self.tray_icon is not tray:
+            return
+        self._stop_tray_icon()
+        self.status_var.set(f"Ilmaisinalueen kuvake ei ole käytettävissä: {error}")
+        self.deiconify()
+        if tray is not None:
+            self._position_widget()
+
+    def _stop_tray_icon(self) -> None:
+        tray = self.tray_icon
         self.tray_icon = None
         self._tray_icon_key = None
+        if tray is not None:
+            try:
+                tray.stop()
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Tray icon shutdown failed")
 
     def _toggle_startup_from_tray(self) -> None:
         if self.startup_change_in_progress:
@@ -1922,7 +2003,7 @@ class WeatherWidget(tk.Tk):
 
         def worker() -> None:
             try:
-                status = check_github_update_status()
+                status = check_github_update_status(self._running_commit)
             except Exception as error:  # noqa: BLE001
                 status = {"state": "error", "message": str(error)}
             self._call_on_ui_thread(
@@ -2821,7 +2902,7 @@ class WeatherWidget(tk.Tk):
         return "break"
 
     def _ensure_fresh_weather(self) -> None:
-        if self.fetch_in_progress:
+        if self.fetch_in_progress or time.monotonic() < self._server_retry_not_before:
             return
 
         if self.latest_weather is None or self.last_weather_update is None or self.weather_failure_count:
@@ -2935,6 +3016,7 @@ class WeatherWidget(tk.Tk):
     def _fetch_worker(self, city: str, temperature_unit: str, place_hint: dict | None) -> None:
         place = place_hint
         city_not_found = False
+        retry_after_ms = 0
         try:
             place = place_hint or _request_with_retry(lambda: geocode_city(city))
             latitude, longitude = _coordinates_from_place(place)
@@ -2960,6 +3042,7 @@ class WeatherWidget(tk.Tk):
             city_not_found = True
         except HTTPError as error:
             message = f"Pyyntö sääpalveluun epäonnistui (HTTP {error.code})."
+            retry_after_ms = math.ceil(_server_retry_delay(error) * 1000)
         except (URLError, TimeoutError, ConnectionError, IncompleteRead) as error:
             if _is_certificate_error(error):
                 message = (
@@ -2978,7 +3061,7 @@ class WeatherWidget(tk.Tk):
         self._call_on_ui_thread(
             lambda: self._show_error(
                 message, notify_user=city_not_found, retry_previous_location=city_not_found,
-                retry_place=place,
+                retry_place=place, retry_after_ms=retry_after_ms,
             )
         )
 
@@ -2997,7 +3080,7 @@ class WeatherWidget(tk.Tk):
 
     def _show_error(
         self, text: str, notify_user: bool = False, retry_previous_location: bool = False,
-        retry_place: dict | None = None,
+        retry_place: dict | None = None, retry_after_ms: int = 0,
     ) -> None:
         self.fetch_in_progress = False
         if self.pending_city_search:
@@ -3014,7 +3097,9 @@ class WeatherWidget(tk.Tk):
         retry_delay = WEATHER_RETRY_DELAYS_MS[retry_index]
         if retry_previous_location and self.latest_weather:
             retry_delay = REFRESH_INTERVAL_MS
-        self.status_var.set(f"Päivitys epäonnistui: {text} Uusi yritys {retry_delay // 60_000} min kuluttua.")
+        self._server_retry_not_before = time.monotonic() + retry_after_ms / 1000
+        retry_delay = max(retry_delay, retry_after_ms)
+        self.status_var.set(f"Päivitys epäonnistui: {text} Uusi yritys {math.ceil(retry_delay / 60_000)} min kuluttua.")
         self.popup_bg_canvas.itemconfigure(self.hero_updated_label, text="Päivitys epäonnistui")
         # Keep the last known condition while marking its tooltip as stale.
         if self.latest_weather:
@@ -3236,6 +3321,7 @@ class WeatherWidget(tk.Tk):
         self.fetch_in_progress = False
         self.weather_failure_count = 0
         self.weather_error_notified = False
+        self._server_retry_not_before = 0.0
         self._schedule_refresh()
         self._run_pending_city_search()
 

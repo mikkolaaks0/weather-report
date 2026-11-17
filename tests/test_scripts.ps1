@@ -122,6 +122,38 @@ try {
             $directoryPath = Join-Path $testDir "$scriptName\Weather Report"
             New-Item -ItemType Directory -Path $directoryPath | Out-Null
             Assert-SafeInstallDirectory $directoryPath
+
+            $notes = Get-Item -LiteralPath (New-Item -ItemType File -Path (Join-Path $directoryPath 'notes.txt')).FullName
+            [System.IO.File]::WriteAllText($notes.FullName, 'unrelated user data')
+            $notes.Attributes = [System.IO.FileAttributes]::Hidden
+            $errorMessage = ''
+            try { Assert-SafeInstallDirectory $directoryPath } catch { $errorMessage = $_.Exception.Message }
+            Assert-True ($errorMessage -like '*does not contain a Weather Report installation*') "$scriptName accepted an unrelated nonempty folder"
+            Assert-True ([System.IO.File]::ReadAllText($notes.FullName) -eq 'unrelated user data') 'Path validation changed unrelated data'
+
+            # An EXE name alone is not enough. Actual releases include the bundled Tk runtime.
+            [System.IO.File]::WriteAllText((Join-Path $directoryPath 'WeatherReport.exe'), 'unrecognized executable')
+            $errorMessage = ''
+            try { Assert-SafeInstallDirectory $directoryPath } catch { $errorMessage = $_.Exception.Message }
+            Assert-True ($errorMessage -like '*does not contain a Weather Report installation*') "$scriptName accepted a folder with just a matching EXE name"
+            $runtimeDir = Join-Path $directoryPath '_internal'
+            $outsideRuntime = Join-Path $testDir "$scriptName\external runtime"
+            $null = [System.IO.Directory]::CreateDirectory($outsideRuntime)
+            [System.IO.File]::WriteAllText((Join-Path $outsideRuntime '_tkinter.pyd'), 'external data')
+            $null = New-Item -ItemType Junction -Path $runtimeDir -Target $outsideRuntime
+            try {
+                $errorMessage = ''
+                try { Assert-SafeInstallDirectory $directoryPath } catch { $errorMessage = $_.Exception.Message }
+                Assert-True ($errorMessage -like '*does not contain a Weather Report installation*') "$scriptName accepted a linked runtime"
+            }
+            finally {
+                [System.IO.Directory]::Delete($runtimeDir)
+            }
+            Assert-True ([System.IO.File]::ReadAllText((Join-Path $outsideRuntime '_tkinter.pyd')) -eq 'external data') 'Path validation changed the linked directory'
+            $null = [System.IO.Directory]::CreateDirectory($runtimeDir)
+            [System.IO.File]::WriteAllText((Join-Path $runtimeDir '_tkinter.pyd'), 'legacy runtime')
+            Assert-SafeInstallDirectory $directoryPath
+
             & {
                 $inspection = @{ Path = $null }
                 function Get-Item {
@@ -295,7 +327,7 @@ try {
         $legacyZip = Join-Path $testDir 'legacy-portable.zip'
         Compress-Archive -LiteralPath @(Get-ChildItem -LiteralPath $package | Select-Object -ExpandProperty FullName) -DestinationPath $legacyZip
         $installTransaction = [scriptblock]::Create($transaction.Extent.Text)
-        foreach ($mode in @('success', 'launch failure', 'occupied destination')) {
+        foreach ($mode in @('success', 'launch failure', 'occupied destination', 'foreign destination')) {
             & {
                 $InstallDir = Join-Path $testDir "$(($mode -split ' ')[0]) [x]\WeatherReport"
                 $installParent = Split-Path -Parent $InstallDir
@@ -309,10 +341,15 @@ try {
                 $exeName = 'WeatherReport.exe'
                 $appName = 'Weather Report'
                 if ($mode -eq 'launch failure') {
-                    $null = [System.IO.Directory]::CreateDirectory($InstallDir)
+                    Expand-Archive -LiteralPath $legacyZip -DestinationPath $InstallDir
                     [System.IO.File]::WriteAllText((Join-Path $InstallDir $exeName), 'previous version')
                 }
+                if ($mode -eq 'foreign destination') {
+                    $null = [System.IO.Directory]::CreateDirectory($InstallDir)
+                    [System.IO.File]::WriteAllText((Join-Path $InstallDir 'foreign.txt'), 'unrelated contents')
+                }
                 function Get-LatestRelease {
+                    Assert-True ($mode -ne 'foreign destination') 'Installer attempted a download before rejecting an unrelated destination'
                     @{ tag_name = 'v0.1.1'; assets = @(@{ name = 'WeatherReport-portable.zip'; browser_download_url = 'fixture' }) }
                 }
                 function Invoke-Download {
@@ -352,6 +389,10 @@ try {
                         Assert-True ([bool]$message) 'Newly occupied destination was accepted'
                         Assert-True (Test-Path -LiteralPath (Join-Path $InstallDir 'foreign.txt')) 'Newly occupied destination was removed'
                         Assert-True (-not (Test-Path -LiteralPath (Join-Path $InstallDir $exeName))) 'Package was moved inside an unowned destination'
+                    }
+                    'foreign destination' {
+                        Assert-True ($message -like '*does not contain a Weather Report installation*') 'Installer did not reject the unrelated destination before accessing GitHub'
+                        Assert-True ([System.IO.File]::ReadAllText((Join-Path $InstallDir 'foreign.txt')) -eq 'unrelated contents') 'Unrelated destination was changed'
                     }
                 }
             }

@@ -34,7 +34,7 @@ class TextFittingTests(unittest.TestCase):
 class LocationSearchTests(unittest.TestCase):
     def test_validated_results_are_deduplicated_without_reordering_relevance(self):
         helsinki = place()
-        results = [place("Helsingborg"), None, {"name": "Broken"}, helsinki, helsinki]
+        results = [place("Helsingborg"), None, {"name": "Broken"}, place("Hel\ud800sinki"), helsinki, helsinki]
         with patch.object(main, "_get_json", return_value={"results": results}) as get:
             self.assertEqual(main.search_cities("  HELSINKI "), [place("Helsingborg"), helsinki])
         self.assertEqual(get.call_args.args[1]["count"], 5)
@@ -56,6 +56,20 @@ class LocationSearchTests(unittest.TestCase):
                 for value in (place("Espoo"), place(latitude=100), None, {"name": "Helsinki"}):
                     main.save_settings({"city": "Helsinki", "place": value})
                     self.assertNotIn("place", main.load_settings())
+
+    def test_malformed_unicode_in_saved_city_recovers_without_losing_other_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_bytes(br'{"city":"Hel\ud800sinki", "temperature_unit":"fahrenheit"}')
+            with patch.object(main, "SETTINGS_PATH", path):
+                settings = main.load_settings()
+                self.assertEqual(settings["city"], main.DEFAULT_CITY)
+                self.assertEqual(settings["temperature_unit"], "fahrenheit")
+                # A properly paired escaped code point still round-trips.
+                path.write_bytes(br'{"city":"\ud840\udc00"}')
+                settings = main.load_settings()
+                self.assertEqual(settings["city"], "\U00020000")
+                self.assertTrue(main.save_settings(settings))
 
     def test_selected_location_reaches_worker_without_name_lookup(self):
         widget = object.__new__(main.WeatherWidget)

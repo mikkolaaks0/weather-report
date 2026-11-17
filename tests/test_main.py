@@ -874,6 +874,7 @@ class TrayMenuTests(unittest.TestCase):
         widget = object.__new__(main.WeatherWidget)
         widget.status_var = Mock()
         widget.deiconify = Mock()
+        widget._start_background_worker = Mock(side_effect=RuntimeError("tray unavailable"))
         tray = Mock()
         tray.run_detached.side_effect = OSError("tray unavailable")
         fake_pystray = Mock()
@@ -1031,6 +1032,7 @@ class TrayMenuTests(unittest.TestCase):
         widget = object.__new__(main.WeatherWidget)
         widget.tray_icon = None
         widget._call_on_ui_thread = lambda callback: callback()
+        widget._start_background_worker = Mock()
         widget.status_var = type("Status", (), {"set": lambda _self, _value: None})()
         calls = []
         widget.toggle_popup = lambda: calls.append("toggle")
@@ -1746,6 +1748,7 @@ class WeatherResultTests(unittest.TestCase):
     def test_clock_moving_backwards_does_not_keep_old_weather_fresh(self) -> None:
         widget = object.__new__(main.WeatherWidget)
         widget.fetch_in_progress = False
+        widget._server_retry_not_before = 0.0
         widget.weather_failure_count = 0
         widget.latest_weather = {"current": {}}
         widget.refresh_weather = Mock()

@@ -52,7 +52,32 @@ class GitUpdateIntegrationTests(unittest.TestCase):
             date = datetime.fromisoformat(timestamp).astimezone().strftime("%d.%m.%Y")
 
             with patch.object(main, "PROJECT_DIR", checkout), patch.object(main, "IS_FROZEN", False):
-                self.assertEqual(main._read_source_version(), f"{date} · {revision[:7]}")
+                version = main._read_source_version()
+                self.assertEqual(version.commit, revision)
+                self.assertEqual(str(version), f"{date} · {revision[:7]}")
+
+    def test_update_already_on_disk_can_restart_offline_with_local_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _remote, _author, checkout = self.remote_checkout(Path(directory))
+            with patch.object(main, "PROJECT_DIR", checkout), patch.object(main, "IS_FROZEN", False):
+                start_version = main._read_source_version()
+                start_signature = main._runtime_file_signature()
+                (checkout / "main.py").write_text("VERSION = 2\n", encoding="utf-8")
+                self.git(checkout, "commit", "-am", "Update applied outside the app")
+                notes = checkout / "notes.txt"
+                notes.write_text("Keep me", encoding="utf-8")
+
+                with (
+                    patch.object(main, "RUNTIME_FILE_SIGNATURE_AT_START", start_signature),
+                    patch.object(main, "_fetch_update_branch", side_effect=OSError("Offline")) as fetch,
+                ):
+                    status = main.check_github_update_status(start_version.commit)
+
+                self.assertEqual(status["state"], "restart_available")
+                fetch.assert_not_called()
+                self.assertEqual(notes.read_text(encoding="utf-8"), "Keep me")
+                with self.assertRaises(RuntimeError):
+                    main.apply_github_update()
 
     def test_git_operations_ignore_an_inherited_foreign_repository(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -250,9 +275,10 @@ class GitUpdateIntegrationTests(unittest.TestCase):
                     self.assertEqual(main.check_github_update_status()["state"], "restart_available")
 
                 with patch.object(main, "RUNTIME_FILE_SIGNATURE_AT_START", main._runtime_file_signature()):
+                    running_commit = self.git(checkout, "rev-parse", "HEAD")
                     self.assertEqual(main.check_github_update_status()["state"], "current")
                     (checkout / "main.py").write_text("LOCAL_CHANGE = True\n", encoding="utf-8")
-                    self.assertEqual(main.check_github_update_status()["state"], "current")
+                    self.assertEqual(main.check_github_update_status(running_commit)["state"], "current")
                     with self.assertRaises(RuntimeError):
                         main.apply_github_update()
                     self.assertEqual((checkout / "main.py").read_text(encoding="utf-8"), "LOCAL_CHANGE = True\n")

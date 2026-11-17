@@ -7,6 +7,7 @@ from the system tray.
 ## Features
 
 - Dynamic weather icon in the Windows system tray
+- A fallback weather window if the tray backend fails during startup
 - Compact popup with current conditions and a 6-day forecast
 - Bundled Fluent-style weather icons for the tray, card, and forecast panel
 - Bundled metric icons for rain amount, rain probability, humidity, and wind rows
@@ -23,6 +24,8 @@ from the system tray.
 - Automatic weather refresh every 30 minutes
 - Failed requests retry after 1, 2, then 5 minutes until recovery; a successful
   refresh restores the 30-minute interval without repeating outage dialogs
+- When the service provides a retry time for HTTP 429 or 503, automatic
+  refresh waits up to 24 hours without keeping a worker busy
 - Failed refreshes are marked on the popup while keeping the last valid forecast
 - Network failures during a city change retry the selected location, not the old city
 - Daily metrics and forecast days follow the location's date, including across midnight
@@ -64,8 +67,9 @@ Useful flags are `-Startup`, `-NoDesktopShortcut`, `-NoStartMenuShortcut`, and
 `WeatherReport` folder; the installer refuses broad user, AppData, Programs, or
 drive-root paths before replacing an existing install. An existing target must
 be a regular directory, not a file, symbolic link, or junction; the uninstaller
-applies the same check. On updates, an existing startup shortcut is preserved
-and rewritten to the current executable path.
+applies the same check. A nonempty target must contain the expected files of a
+packaged Weather Report installation. On updates, an existing startup shortcut
+is preserved and rewritten to the current executable path.
 Downloads have time limits, and the installer stops only the executable inside
 the installation being replaced. An app that exits during that stop is treated
 as already stopped; real termination failures still abort the operation.
@@ -452,6 +456,8 @@ local file or if the histories have diverged.
 That local restart check works without an internet connection and compares file
 content hashes, so timestamp-only changes do not request a
 restart and same-size edits with identical timestamps are still detected.
+A committed update on disk can be activated by restarting even while unrelated
+local edits are present. Uncommitted edits alone do not trigger a restart offer.
 Only running code, dependency requirements, launchers, metadata, PNG/ICO assets,
 and font files are tracked;
 SVG editing sources, the original logo source, and documentation do not trigger

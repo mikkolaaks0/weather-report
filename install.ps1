@@ -89,6 +89,17 @@ function Assert-SafeInstallDirectory {
         if (-not $existing.PSIsContainer -or ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
             throw "Install path must be a regular directory, not a file or link: $fullPath"
         }
+        if (Get-ChildItem -LiteralPath $fullPath -Force -ErrorAction Stop | Select-Object -First 1) {
+            # Even the oldest portable packages contain the executable and Tk runtime.
+            foreach ($name in @('WeatherReport.exe', '_internal', '_internal\_tkinter.pyd')) {
+                $marker = Get-Item -LiteralPath (Join-Path $fullPath $name) -Force -ErrorAction SilentlyContinue
+                $expectDirectory = $name -eq '_internal'
+                if (-not $marker -or $marker.PSIsContainer -ne $expectDirectory -or
+                    ($marker.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                    throw "The folder is not empty and does not contain a Weather Report installation: $fullPath. Use an empty folder or an existing installation."
+                }
+            }
+        }
     }
 }
 

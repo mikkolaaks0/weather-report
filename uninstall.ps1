@@ -65,6 +65,17 @@ function Assert-SafeInstallDirectory {
         if (-not $existing.PSIsContainer -or ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
             throw "Install path must be a regular directory, not a file or link: $fullPath"
         }
+        if (Get-ChildItem -LiteralPath $fullPath -Force -ErrorAction Stop | Select-Object -First 1) {
+            # Even the oldest portable packages contain the executable and Tk runtime.
+            foreach ($name in @('WeatherReport.exe', '_internal', '_internal\_tkinter.pyd')) {
+                $marker = Get-Item -LiteralPath (Join-Path $fullPath $name) -Force -ErrorAction SilentlyContinue
+                $expectDirectory = $name -eq '_internal'
+                if (-not $marker -or $marker.PSIsContainer -ne $expectDirectory -or
+                    ($marker.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                    throw "The folder is not empty and does not contain a Weather Report installation: $fullPath."
+                }
+            }
+        }
     }
 }
 
@@ -128,12 +139,14 @@ Write-Host "Uninstalling $appName..."
 $exePath = Join-Path $InstallDir 'WeatherReport.exe'
 Stop-InstalledApplication -ExecutablePath $exePath
 
-foreach ($shortcutPath in $shortcutPaths) {
-    Remove-InstalledShortcut -Path $shortcutPath -ExecutablePath $exePath
+if (Test-Path -LiteralPath $InstallDir) {
+    # The installer may have changed the destination while the process was stopping.
+    Assert-SafeInstallDirectory -Path $InstallDir
+    Remove-Item -LiteralPath $InstallDir -Recurse -Force
 }
 
-if (Test-Path -LiteralPath $InstallDir) {
-    Remove-Item -LiteralPath $InstallDir -Recurse -Force
+foreach ($shortcutPath in $shortcutPaths) {
+    Remove-InstalledShortcut -Path $shortcutPath -ExecutablePath $exePath
 }
 
 if ($RemoveSettings -and $settingDir -and (Test-Path -LiteralPath $settingDir)) {

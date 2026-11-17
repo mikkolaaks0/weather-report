@@ -1,7 +1,10 @@
 import os
+import queue
+import threading
 import unittest
 from contextlib import ExitStack, contextmanager
-from unittest.mock import Mock, patch
+from email.message import Message
+from unittest.mock import Mock, PropertyMock, patch
 from urllib.error import HTTPError
 
 import main
@@ -24,7 +27,84 @@ class WeatherFailureFeedbackTests(unittest.TestCase):
                     notify_user=False,
                     retry_previous_location=False,
                     retry_place=place,
+                    retry_after_ms=0,
                 )
+
+
+@unittest.skipUnless(os.name == "nt", "Windows tray lifecycle")
+class TrayStartupTests(unittest.TestCase):
+    def make_widget(self):
+        widget = object.__new__(main.WeatherWidget)
+        widget._is_destroying = False
+        widget._ui_thread_id = threading.get_ident()
+        widget._ui_callbacks = queue.SimpleQueue()
+        widget.status_var = Mock()
+        widget.deiconify = Mock()
+        widget._position_widget = Mock()
+        return widget
+
+    def test_native_startup_and_registration_failures_open_one_fallback_on_tk_thread(self):
+        for register in (False, True):
+            with self.subTest(register=register):
+                widget = self.make_widget()
+                tray = Mock()
+                daemon_states = []
+
+                def run(*, setup):
+                    daemon_states.append((threading.current_thread().daemon, threading.Thread().daemon))
+                    if not register:
+                        raise OSError("could not create native tray window")
+                    setup(tray)  # Shell registration fails, and the loop subsequently exits.
+
+                tray.run.side_effect = run
+                with (
+                    patch.object(main, "pystray", Mock(Icon=Mock(return_value=tray))),
+                    patch.object(main, "build_weather_tray_icon", return_value=object()),
+                    patch.object(type(tray), "visible", new_callable=PropertyMock, create=True) as visible,
+                    self.assertLogs(main.LOGGER, level="ERROR"),
+                ):
+                    visible.side_effect = OSError("could not register shell icon")
+                    widget._init_tray_icon()
+                    callbacks = [widget._ui_callbacks.get(timeout=5) for _ in range(2 if register else 1)]
+                    widget.deiconify.assert_not_called()
+                    self.assertEqual(daemon_states, [(True, True)])
+                    for callback in callbacks:
+                        callback()
+
+                self.assertIsNone(widget.tray_icon)
+                tray.stop.assert_called_once()
+                widget.deiconify.assert_called_once()
+                widget._position_widget.assert_called_once()
+
+    def test_tray_ready_after_shutdown_stops_without_showing_either_window(self):
+        widget = self.make_widget()
+        tray = Mock(visible=False)
+        ready = threading.Event()
+        resume = threading.Event()
+        finished = threading.Event()
+
+        def run(*, setup):
+            ready.set()
+            if resume.wait(timeout=5):
+                setup(tray)
+            finished.set()
+
+        tray.run.side_effect = run
+        with (
+            patch.object(main, "pystray", Mock(Icon=Mock(return_value=tray))),
+            patch.object(main, "build_weather_tray_icon", return_value=object()),
+        ):
+            widget._init_tray_icon()
+            self.assertTrue(ready.wait(timeout=5))
+            widget._is_destroying = True
+            widget._stop_tray_icon()
+            resume.set()
+            self.assertTrue(finished.wait(timeout=5))
+
+        self.assertFalse(tray.visible)
+        self.assertEqual(tray.stop.call_count, 2)  # Once on close and once after it becomes ready.
+        widget.deiconify.assert_not_called()
+        self.assertTrue(widget._ui_callbacks.empty())
 
 
 class TrayFeedbackTests(unittest.TestCase):
@@ -301,6 +381,29 @@ class TimerLifecycleTests(unittest.TestCase):
             widget.fetch_in_progress = True
             widget._ensure_fresh_weather()
             refresh.assert_called_once()
+
+    def test_rate_limited_forecast_waits_for_the_server_before_automatic_retry(self) -> None:
+        widget = self.widget
+        place = {"name": "Espoo", "latitude": 60.2, "longitude": 24.65}
+        headers = Message()
+        headers["Retry-After"] = "180"
+        error = HTTPError(main.FORECAST_URL, 429, "Rate limited", headers, None)
+        with (
+            patch.object(main, "get_weather", side_effect=error) as forecast,
+            patch.object(main.time, "monotonic", return_value=100.0) as clock,
+            patch.object(main.messagebox, "showerror"),
+            patch.object(widget, "after", wraps=widget.after) as after,
+            patch.object(widget, "refresh_weather") as refresh,
+        ):
+            widget._fetch_worker("Espoo", "celsius", place)
+            forecast.assert_called_once()
+            self.assertEqual(after.call_args.args[0], 180_000)
+            clock.return_value = 279.0
+            widget._ensure_fresh_weather()
+            refresh.assert_not_called()
+            clock.return_value = 280.0
+            widget._ensure_fresh_weather()
+            refresh.assert_called_once_with()
 
     def test_opening_card_after_location_midnight_refreshes_recent_weather(self) -> None:
         widget = self.widget
@@ -744,7 +847,8 @@ class PopupSmokeTests(unittest.TestCase):
             patch.object(main.WeatherWidget, "_init_tray_icon"),
             patch.object(main.WeatherWidget, "_start_background_worker"),
         ):
-            widget = main.WeatherWidget(source_version="18.11.2026 · abc1234")
+            version = main.SourceVersion("abc1234", main.datetime(2026, 11, 18))
+            widget = main.WeatherWidget(source_version=version)
             try:
                 widget._layout_popup_content(widget._px(584), widget._px(329))
                 widget._apply_weather({"name": "Espoo", "admin1": "Uusimaa"}, weather, "Espoo")
