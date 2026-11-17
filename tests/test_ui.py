@@ -12,6 +12,21 @@ import main
 
 @unittest.skipIf(main.Image is None, "Pillow is not available")
 class IconRenderingTests(unittest.TestCase):
+    def test_tray_contour_preserves_the_face_and_transparent_gaps(self):
+        face = (239, 246, 250, 255)
+        source = main.Image.new("RGBA", (60, 60))
+        source.paste(face, (0, 0, 60, 18))
+        source.paste(face, (0, 42, 60, 60))
+        with patch.object(main, "_load_weather_icon_image", return_value=source):
+            tray = main.build_weather_tray_icon("fog")
+        self.assertEqual(tray.size, (64, 64))
+        self.assertEqual(tray.getpixel((32, 10)), face)
+        self.assertEqual(tray.getpixel((32, 32))[3], 0)
+        for x in (0, 63):
+            red, green, blue, alpha = tray.getpixel((x, 10))
+            self.assertLess(max(red, green, blue), min(face[:3]))
+            self.assertTrue(0 < alpha < 255)
+
     def test_icon_artwork_fits_inside_the_exported_png(self):
         for directory in (main.WEATHER_ICONS_DIR, main.METRIC_ICONS_DIR):
             for path in directory.glob("*.png"):

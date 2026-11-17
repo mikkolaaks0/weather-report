@@ -499,7 +499,17 @@ def build_weather_icon_photo(icon_key: str, width: int, height: int):
 
 
 def build_weather_tray_icon(icon_key: str):
-    return _resize_weather_icon_image(_load_weather_icon_image(icon_key), 64, 64)
+    image = _resize_weather_icon_image(_load_weather_icon_image(icon_key), 60, 60)
+    if image is None:
+        return None
+
+    # A half-pixel contour at 16 px keeps pale clouds visible on a light taskbar.
+    alpha = Image.new("L", (64, 64))
+    alpha.paste(image.getchannel("A"), (2, 2))
+    tray = Image.new("RGBA", alpha.size, (43, 69, 91))
+    tray.putalpha(alpha.filter(ImageFilter.MaxFilter(5)).point(lambda value: value // 2))
+    tray.alpha_composite(image, (2, 2))
+    return tray
 
 
 def _metric_icon_path(icon_key: str) -> Path:
