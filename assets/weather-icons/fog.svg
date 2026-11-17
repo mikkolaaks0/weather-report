@@ -27,8 +27,8 @@
       <path d="M32 153c7 8 16 12 29 12h140c13 0 24-4 32-12-6 12-16 18-31 18H59c-12 0-22-6-27-18Z" fill="#A8C8D9" opacity=".26"/>
     </g>
     <g fill="none" stroke-linecap="round">
-      <path d="M43 154h137m-97 28h130" stroke="#739DB7" stroke-width="13"/>
-      <path d="M43 153h137m-97 28h130" stroke="url(#mist)" stroke-width="10"/>
+      <path d="M47 197h148m-83 34h104" stroke="#739DB7" stroke-width="14"/>
+      <path d="M47 196h148m-83 34h104" stroke="url(#mist)" stroke-width="11"/>
     </g>
   </g>
 </svg>

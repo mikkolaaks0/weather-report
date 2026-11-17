@@ -19,10 +19,10 @@
       <stop offset=".65" stop-color="#A9C4D8"/>
       <stop offset="1" stop-color="#8BA8C0"/>
     </linearGradient>
-    <radialGradient id="water" cx="30%" cy="30%" r="80%">
-      <stop stop-color="#BDEEFF"/>
-      <stop offset=".5" stop-color="#78CFFF"/>
-      <stop offset="1" stop-color="#359AD8"/>
+    <radialGradient id="hail" cx="32%" cy="26%" r="80%">
+      <stop stop-color="#F4FBFF"/>
+      <stop offset=".58" stop-color="#D8EDF7"/>
+      <stop offset="1" stop-color="#9AC4DB"/>
     </radialGradient>
     <linearGradient id="bolt" x1="22%" y1="0%" x2="63%" y2="95%">
       <stop stop-color="#FFF083"/>
@@ -38,6 +38,9 @@
       <path d="M32 153c7 8 16 12 29 12h140c13 0 24-4 32-12-6 12-16 18-31 18H59c-12 0-22-6-27-18Z" fill="#A8C8D9" opacity=".26"/>
     </g>
     <path transform="translate(0 0) scale(1)" d="M111 112h42l-22 45h28l-62 72 17-54H89Z" fill="url(#bolt)" stroke="#D49A32" stroke-width="3.5" stroke-linejoin="round"/>
-    <circle cx="178" cy="190" r="11" fill="url(#water)" stroke="#559FC6" stroke-width="2"/>
+    <g fill="url(#hail)" stroke="#7B9EB3" stroke-width="2.5">
+      <circle cx="192" cy="185" r="13"/>
+      <circle cx="163" cy="211" r="11"/>
+    </g>
   </g>
 </svg>

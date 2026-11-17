@@ -24,6 +24,13 @@
       <stop stop-color="#D0F6FF"/>
       <stop offset="1" stop-color="#66BDE8"/>
     </linearGradient>
+    <path id="crystal" d="M-23 0h46 M-11.5-20l23 40 M-11.5 20l23-40
+      M20-5 15 0 20 5 M14.3 14.8 7.5 13 5.7 19.8 M-5.7 19.8-7.5 13-14.3 14.8
+      M-20 5-15 0-20-5 M-14.3-14.8-7.5-13-5.7-19.8 M5.7-19.8 7.5-13 14.3-14.8"/>
+    <g id="flake" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <use href="#crystal" stroke="#5A9FC8" stroke-width="6.8"/>
+      <use href="#crystal" stroke="url(#ice)" stroke-width="4.8"/>
+    </g>
   </defs>
   <g filter="url(#shadow)">
     <circle cx="84" cy="83" r="53" fill="url(#sun)" stroke="#DC9B38" stroke-opacity=".48" stroke-width="2"/>
@@ -32,13 +39,7 @@
       <path d="M142 127c1-21 17-43 39-43 17 0 31 10 37 25 10 4 18 14 19 25 0 17-16 30-42 30-29 0-54-12-53-37Z" fill="url(#cloudLight)"/>
       <path d="M32 153c7 8 16 12 29 12h140c13 0 24-4 32-12-6 12-16 18-31 18H59c-12 0-22-6-27-18Z" fill="#A8C8D9" opacity=".26"/>
     </g>
-    <g transform="translate(109 193) scale(1.03)" fill="none" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M0-22v44M-19-11l38 22M-19 11l38-22M-6-16l6 5 6-5M-6 16l6-5 6 5" stroke="#5A9FC8" stroke-width="8.6"/>
-      <path d="M0-22v44M-19-11l38 22M-19 11l38-22M-6-16l6 5 6-5M-6 16l6-5 6 5" stroke="url(#ice)" stroke-width="5.8"/>
-    </g>
-    <g transform="translate(174 179) scale(0.79)" fill="none" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M0-22v44M-19-11l38 22M-19 11l38-22M-6-16l6 5 6-5M-6 16l6-5 6 5" stroke="#5A9FC8" stroke-width="8.6"/>
-      <path d="M0-22v44M-19-11l38 22M-19 11l38-22M-6-16l6 5 6-5M-6 16l6-5 6 5" stroke="url(#ice)" stroke-width="5.8"/>
-    </g>
+    <use href="#flake" transform="translate(104 209) scale(1.29)"/>
+    <use href="#flake" transform="translate(173 197) scale(.78)"/>
   </g>
 </svg>
